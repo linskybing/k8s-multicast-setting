@@ -65,6 +65,7 @@ k8s-ros2-multicast/
 │   ├── 03-install-gpu-drivers.sh   # Install NVIDIA Drivers, MPS, Device Plugin
 │   ├── 04-deploy-ros2-app.sh       # Deploy ROS2 Test App (Talker/Listener)
 │   ├── 05-install-monitoring-harbor.sh # Install Helm, Longhorn, Prometheus, Harbor, DCGM
+│   ├── 06-setup-public-dashboards.sh # Setup Public Grafana Dashboards (Namespace/Resources)
 │   └── 99-resize-disk.sh           # Utility to expand LVM disk space
 └── README.md
 ```
@@ -125,15 +126,23 @@ cd scripts
 *   Attaches them to the `macvlan-conf` network.
 *   Verifies Multicast communication via logs.
 
+### Step 6: Setup Public Dashboards
+\`\`\`bash
+./06-setup-public-dashboards.sh
+\`\`\`
+*   Enables anonymous access to Grafana (Public View).
+*   Installs **Namespace Overview**, **Compute Resources**, and **Cluster Top Pods** dashboards.
+*   Outputs direct links to monitor specific namespaces and identify resource hogs.
+
 ---
 
 ## 📊 Access Points
 
 | Service | Access Method | URL / Command | Credentials |
 | :--- | :--- | :--- | :--- |
-| **Grafana** | NodePort | `http://<NodeIP>:30003` | User: `admin`<br>Pass: (See Script Output) |
-| **Harbor** | NodePort | `http://<NodeIP>:30002` | User: `admin`<br>Pass: `Harbor12345` |
-| **Longhorn UI** | Port Forward | `localhost:8000` | N/A |
+| **Grafana** | NodePort | \`http://<NodeIP>:30003\` | **Public** (No Login) |
+| **Harbor** | NodePort | \`http://<NodeIP>:30002\` | User: \`admin\`<br>Pass: \`Harbor12345\` |
+| **Longhorn UI** | Port Forward | \`localhost:8000\` | N/A |
 
 **Port Forward Commands (Optional):**
 ```bash
