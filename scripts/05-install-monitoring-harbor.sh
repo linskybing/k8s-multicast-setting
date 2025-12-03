@@ -50,8 +50,19 @@ kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f 
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --set grafana.service.type=NodePort \
+  --set grafana.service.nodePort=30003 \
   --set prometheus.service.type=NodePort \
   --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+
+echo "Adding Detailed Pod Dashboard to Grafana..."
+curl -L -o /tmp/pod-dashboard.json https://grafana.com/api/dashboards/15760/revisions/latest/download
+# Create ConfigMap with label grafana_dashboard=1 so the sidecar picks it up
+kubectl create configmap grafana-dashboard-pods \
+  --namespace monitoring \
+  --from-file=pod-dashboard.json=/tmp/pod-dashboard.json \
+  --dry-run=client -o yaml > /tmp/dashboard.yaml
+kubectl label --local -f /tmp/dashboard.yaml grafana_dashboard=1 -o yaml | kubectl apply -f -
+rm /tmp/pod-dashboard.json /tmp/dashboard.yaml
 
 echo "=== 5. Installing DCGM Exporter (GPU Metrics) ==="
 # This exports NVIDIA GPU metrics to Prometheus
@@ -60,22 +71,8 @@ echo "=== 5. Installing DCGM Exporter (GPU Metrics) ==="
 # However, for standalone DCGM exporter, we can use the community chart or direct manifest.
 
 echo "Attempting to install DCGM Exporter..."
-# Using the official NVIDIA GPU Operator Helm repository which usually contains dcgm-exporter
-# But sometimes it's better to use the direct manifest for simplicity in non-operator setups.
-
-# Option 1: Try Helm (if available in repo)
-if helm search repo nvidia/dcgm-exporter &> /dev/null; then
-    helm upgrade --install dcgm-exporter nvidia/dcgm-exporter \
-      --namespace monitoring \
-      --set serviceMonitor.enabled=true
-else
-    echo "Helm chart not found. Falling back to K8s Manifest..."
-    # Option 2: Use K8s Manifest (Stable and reliable for standalone)
-    kubectl apply -f https://raw.githubusercontent.com/NVIDIA/dcgm-exporter/main/deployment/k8s/dcgm-exporter.yaml
-    
-    # Patch the service to have a label for ServiceMonitor (if needed later)
-    # But for now, we just ensure it runs.
-fi
+# Using K8s Manifest (Stable and reliable for standalone)
+kubectl apply -f https://raw.githubusercontent.com/NVIDIA/dcgm-exporter/main/dcgm-exporter.yaml
 
 echo "=== 6. Installing Harbor (Registry) ==="
 kubectl create namespace harbor --dry-run=client -o yaml | kubectl apply -f -
@@ -105,14 +102,14 @@ echo ""
 echo ">>> Grafana Access <<<"
 echo "Get Admin Password:"
 echo "kubectl get secret --namespace monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 --decode ; echo"
-echo "Access via Port-Forward:"
-echo "kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80"
-echo "(Then open http://localhost:3000)"
+echo "Access via NodePort:"
+echo "http://<NodeIP>:30003"
 echo ""
 echo ">>> Harbor Access <<<"
 echo "Default User: admin"
 echo "Default Pass: Harbor12345"
-echo "Access via Port-Forward:"
-echo "kubectl port-forward -n harbor svc/harbor-portal 8080:80"
-echo "(Then open http://localhost:8080)"
+echo "Access via NodePort:"
+echo "http://<NodeIP>:30002"
 echo "----------------------------------------------------------------"
+
+# kubectl get secret --namespace monitoring kube-prometheus-stack-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo

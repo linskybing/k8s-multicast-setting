@@ -59,6 +59,7 @@ k8s-ros2-multicast/
 │       ├── deployment.yaml         # ROS2 Talker/Listener Deployment
 │       └── service.yaml            # ROS2 Service (Optional)
 ├── scripts/
+│   ├── 00-sysctl-tuning.sh         # Tune System Limits (Inotify/OpenFiles)
 │   ├── 01-cluster-init.sh          # Init K8s, Calico, Containerd
 │   ├── 02-install-cni-multicast.sh # Install Multus & Macvlan Config
 │   ├── 03-install-gpu-drivers.sh   # Install NVIDIA Drivers, MPS, Device Plugin
@@ -72,11 +73,20 @@ k8s-ros2-multicast/
 
 ## 🚀 Deployment Guide
 
+### Step 0: System Tuning (Prerequisite)
+```bash
+cd scripts
+./00-sysctl-tuning.sh
+```
+*   Increases `fs.inotify.max_user_watches` and `fs.file-max`.
+*   Prevents "Too many open files" errors with Longhorn/Prometheus.
+
 ### Step 1: Initialize Cluster
 ```bash
 cd scripts
 ./01-cluster-init.sh
 ```
+
 *   Sets up Kubeadm, Kubelet, Kubectl.
 *   Installs Calico CNI.
 *   Removes Control Plane Taint.
@@ -121,18 +131,16 @@ cd scripts
 
 | Service | Access Method | URL / Command | Credentials |
 | :--- | :--- | :--- | :--- |
-| **Grafana** | Port Forward | `localhost:3000` | User: `admin`<br>Pass: (See Script Output) |
+| **Grafana** | NodePort | `http://<NodeIP>:30003` | User: `admin`<br>Pass: (See Script Output) |
 | **Harbor** | NodePort | `http://<NodeIP>:30002` | User: `admin`<br>Pass: `Harbor12345` |
 | **Longhorn UI** | Port Forward | `localhost:8000` | N/A |
 
-**Port Forward Commands:**
+**Port Forward Commands (Optional):**
 ```bash
-# Grafana
-kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80
-
 # Longhorn
 kubectl port-forward -n longhorn-system svc/longhorn-frontend 8000:80
 ```
+
 
 ## 🔧 Troubleshooting
 
