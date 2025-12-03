@@ -2,7 +2,7 @@
 
 This project provides a complete setup for a Kubernetes cluster optimized for ROS2 applications requiring **Multicast** communication and **NVIDIA GPU** acceleration. It includes a full monitoring stack and a private registry.
 
-## 🏗 Architecture Overview
+## Architecture Overview
 
 ### 1. Kubernetes Cluster
 *   **Version**: v1.29 (Stable)
@@ -46,7 +46,7 @@ The cluster uses a dual-homed network setup via **Multus CNI**:
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 k8s-ros2-multicast/
@@ -72,7 +72,7 @@ k8s-ros2-multicast/
 
 ---
 
-## 🚀 Deployment Guide
+## Deployment Guide
 
 ### Step 0: System Tuning (Prerequisite)
 ```bash
@@ -136,7 +136,7 @@ cd scripts
 
 ---
 
-## 📊 Access Points
+## Access Points
 
 | Service | Access Method | URL / Command | Credentials |
 | :--- | :--- | :--- | :--- |
@@ -151,7 +151,7 @@ kubectl port-forward -n longhorn-system svc/longhorn-frontend 8000:80
 ```
 
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 *   **Pod Stuck in ContainerCreating**: Check disk space (`df -h`) or CNI errors (`kubectl describe pod`).
 *   **Multicast Not Working**: Ensure `macvlan-conf.yaml` uses the correct physical interface (`master: enp6s18`).
