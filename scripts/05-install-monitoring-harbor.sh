@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== 1. Installing Helm ==="
+echo "=== 1. Verifying Helm Installation ==="
 if ! command -v helm &> /dev/null; then
     echo "Helm not found. Installing..."
     curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash

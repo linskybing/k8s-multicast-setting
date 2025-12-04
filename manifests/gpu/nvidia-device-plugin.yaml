@@ -1,3 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-plugin-configs
+  namespace: kube-system
+data:
+  config.yaml: |
+    version: v1
+    sharing:
+      mps:
+        renameByDefault: true
+        resources:
+        - name: nvidia.com/gpu
+          replicas: 10
+          # Note: 'rename' is not supported for time-slicing in this version.
+          # To distinguish shared nodes, use Node Labels (e.g. gpu-type=shared).
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -14,25 +31,52 @@ spec:
       labels:
         name: nvidia-device-plugin-ds
     spec:
+      hostIPC: true
+      hostPID: true
       tolerations:
       - key: nvidia.com/gpu
         operator: Exists
         effect: NoSchedule
       priorityClassName: "system-node-critical"
       containers:
-      - image: nvcr.io/nvidia/k8s-device-plugin:v0.14.0
+      - image: nvcr.io/nvidia/k8s-device-plugin:v0.17.0
         name: nvidia-device-plugin-ctr
+        imagePullPolicy: Always
+        args:
+          - "--config-file=/etc/nvidia-device-plugin/config.yaml"
+          - "--mps-root=/run/nvidia/mps"
         env:
           - name: FAIL_ON_INIT_ERROR
             value: "false"
+          - name: NVIDIA_VISIBLE_DEVICES
+            value: "all"
+          - name: NVIDIA_DRIVER_CAPABILITIES
+            value: "all"
+          - name: CUDA_MPS_PIPE_DIRECTORY
+            value: "/run/nvidia/mps"
         securityContext:
-          allowPrivilegeEscalation: false
+          allowPrivilegeEscalation: true
           capabilities:
-            drop: ["ALL"]
+            add: ["SYS_ADMIN"]
         volumeMounts:
           - name: device-plugin
             mountPath: /var/lib/kubelet/device-plugins
+          - name: config
+            mountPath: /etc/nvidia-device-plugin
+          - name: mps-root
+            mountPath: /run/nvidia/mps
+          - name: mps-log
+            mountPath: /var/log/nvidia-mps
       volumes:
         - name: device-plugin
           hostPath:
             path: /var/lib/kubelet/device-plugins
+        - name: config
+          configMap:
+            name: nvidia-plugin-configs
+        - name: mps-root
+          hostPath:
+            path: /tmp/nvidia-mps
+        - name: mps-log
+          hostPath:
+            path: /var/log/nvidia-mps

@@ -1,0 +1,28 @@
+config:
+  map:
+    default: |-
+      version: v1
+      sharing:
+        timeSlicing:
+          renameByDefault: true
+          resources:
+          - name: nvidia.com/gpu
+            replicas: 10
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations:
+  - key: "node-role.kubernetes.io/master"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+env:
+  - name: MPS_ROOT
+    value: /mps
+
+
+

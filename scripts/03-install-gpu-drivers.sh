@@ -71,50 +71,60 @@ else
     fi
 fi
 
+# Install NVIDIA Container Toolkit if not present
+if ! command -v nvidia-ctk &> /dev/null; then
+    echo "Installing NVIDIA Container Toolkit..."
+    ./install-nvidia-toolkit.sh
+else
+    echo "NVIDIA Container Toolkit already installed."
+    # Ensure configuration is correct (default runtime = nvidia)
+    if ! grep -q 'default_runtime_name = "nvidia"' /etc/containerd/config.toml; then
+        echo "Updating containerd config to use nvidia runtime by default..."
+        sudo sed -i 's/default_runtime_name = "runc"/default_runtime_name = "nvidia"/' /etc/containerd/config.toml
+        sudo systemctl restart containerd
+    fi
+fi
+
 # Enable NVIDIA Persistence Mode (Required for MPS)
 echo "Enabling NVIDIA Persistence Mode..."
 sudo nvidia-smi -pm 1 || echo "Warning: Failed to enable persistence mode. MPS might not work."
 
-# Configure and Start NVIDIA MPS (Multi-Process Service)
-echo "Configuring NVIDIA MPS..."
-if ! systemctl is-active --quiet nvidia-mps; then
-    # Create systemd service for MPS if it doesn't exist
-    cat <<EOF | sudo tee /etc/systemd/system/nvidia-mps.service
-[Unit]
-Description=NVIDIA MPS Server
-After=syslog.target network.target
-
-[Service]
-Type=forking
-ExecStart=/usr/bin/nvidia-cuda-mps-control -d
-ExecStop=/bin/echo quit | /usr/bin/nvidia-cuda-mps-control
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now nvidia-mps
-    echo "NVIDIA MPS service started."
-else
-    echo "NVIDIA MPS service is already running."
+# Disable Host MPS (Managed by Helm Chart now)
+echo "Disabling Host NVIDIA MPS (to avoid conflicts with K8s DaemonSet)..."
+if systemctl is-active --quiet nvidia-mps; then
+    sudo systemctl stop nvidia-mps
+    sudo systemctl disable nvidia-mps
+    echo "Host NVIDIA MPS service stopped and disabled."
 fi
 
-# Install NVIDIA Device Plugin for Kubernetes
-echo "Deploying NVIDIA Device Plugin..."
-# We use the local manifest which should be configured for our needs
-if [ -f ../manifests/gpu/nvidia-device-plugin.yaml ]; then
-    kubectl apply -f ../manifests/gpu/nvidia-device-plugin.yaml
+# Install Helm if not present
+echo "=== Installing Helm ==="
+if ! command -v helm &> /dev/null; then
+    echo "Helm not found. Installing..."
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 else
-    echo "Downloading official NVIDIA Device Plugin manifest..."
-    mkdir -p ../manifests/gpu
-    curl -fsSL https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.16.2/nvidia-device-plugin.yml -o ../manifests/gpu/nvidia-device-plugin.yaml
-    kubectl apply -f ../manifests/gpu/nvidia-device-plugin.yaml
+    echo "Helm is already installed."
 fi
+
+# Install NVIDIA Device Plugin via Helm
+echo "Deploying NVIDIA Device Plugin via Helm..."
+helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
+helm repo update
+
+# Ensure the values file exists
+VALUES_FILE="../manifests/gpu/nvidia-device-plugin-values.yaml"
+if [ ! -f "$VALUES_FILE" ]; then
+    echo "Error: Values file $VALUES_FILE not found!"
+    exit 1
+fi
+
+echo "Installing/Upgrading NVIDIA Device Plugin..."
+helm upgrade --install nvidia-device-plugin nvdp/nvidia-device-plugin \
+  --namespace kube-system \
+  --version 0.18.0 \
+  -f "$VALUES_FILE" \
+  --wait
 
 echo "Waiting for device plugin to be ready..."
-# The label might vary, usually it's app=nvidia-device-plugin-daemonset or name=nvidia-device-plugin-ds
-# We'll just wait a bit and show status
-sleep 10
-kubectl get pods -n kube-system -l app=nvidia-device-plugin-daemonset
-kubectl get nodes "-o=custom-columns=NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu"
+kubectl get pods -n kube-system -l app.kubernetes.io/name=nvidia-device-plugin
+kubectl get nodes "-o=custom-columns=NAME:.metadata.name,GPU_SHARED:.status.allocatable.nvidia\.com/gpu\.shared"
