@@ -28,6 +28,7 @@ kubectl create namespace longhorn-system --dry-run=client -o yaml | kubectl appl
 helm upgrade --install longhorn longhorn/longhorn \
   --namespace longhorn-system \
   --set defaultSettings.createDefaultDiskLabeledNodes=true \
+  --set defaultSettings.allowVolumeExpansion=true \
   --set persistence.defaultClassReplicaCount=1 \
   --set persistence.defaultClass=true
 
@@ -80,16 +81,29 @@ kubectl create namespace harbor --dry-run=client -o yaml | kubectl apply -f -
 # Install Harbor
 # Note: We disable TLS for internal testing simplicity (expose.tls.enabled=false)
 # We use NodePort to expose it.
+# Optimized storage sizes for limited capacity multi-user environment
 helm upgrade --install harbor harbor/harbor \
   --namespace harbor \
   --set expose.type=nodePort \
   --set expose.tls.enabled=false \
   --set externalURL=http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):30002 \
   --set persistence.persistentVolumeClaim.registry.storageClass=longhorn \
+  --set persistence.persistentVolumeClaim.registry.size=30Gi \
   --set persistence.persistentVolumeClaim.jobservice.storageClass=longhorn \
+  --set persistence.persistentVolumeClaim.jobservice.size=10Gi \
   --set persistence.persistentVolumeClaim.database.storageClass=longhorn \
+  --set persistence.persistentVolumeClaim.database.size=10Gi \
   --set persistence.persistentVolumeClaim.redis.storageClass=longhorn \
-  --set persistence.persistentVolumeClaim.trivy.storageClass=longhorn
+  --set persistence.persistentVolumeClaim.redis.size=5Gi \
+  --set persistence.persistentVolumeClaim.trivy.storageClass=longhorn \
+  --set persistence.persistentVolumeClaim.trivy.size=10Gi \
+  --set harborAdminPassword=Harbor12345 \
+  --set logLevel=info \
+  --set core.gc.enabled=true \
+  --set core.gc.timeWindowHours=24 \
+  --set jobservice.jobLoggers[0]=STDERR \
+  --set jobservice.jobLoggers[1]=FILE \
+  --set jobservice.loggerSweeper.duration=720h
 
 echo "----------------------------------------------------------------"
 echo "Installation initiated. It may take a few minutes for all pods to start."

@@ -1,44 +1,44 @@
 #!/bin/bash
 
-# Reset Kubernetes Cluster Node (Head or Worker)
-
-echo "WARNING: This script will delete the Kubernetes cluster configuration on this node."
-echo "It will run 'kubeadm reset', remove configuration files, and flush iptables."
+# Gentle Kubernetes Node Reset Script (v3 - Force Etcd Cleanup)
+echo "WARNING: This script will reset Kubernetes configuration on this node."
 read -p "Are you sure you want to continue? (y/N) " -n 1 -r
 echo
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted."
+    echo "Operation aborted."
     exit 1
 fi
 
-echo ">>> Resetting kubeadm..."
+echo ">>> 1. Running official kubeadm reset..."
 sudo kubeadm reset -f
 
-echo ">>> Cleaning up CNI and Kubernetes directories..."
+echo ">>> 2. Cleaning up CNI configuration files..."
 sudo rm -rf /etc/cni/net.d
-sudo rm -rf /etc/kubernetes
+
+echo ">>> 3. Forcing release of busy directories..."
+# Lazy unmount (-l) detaches the filesystem now, and cleans up references later.
+# This is much safer than a hardware-level 'force' which can crash the system.
+sudo umount -l /var/lib/etcd 2>/dev/null
+sudo umount -l /var/lib/kubelet 2>/dev/null
+
+# Small sleep to allow the kernel to update the file descriptors
+sleep 2
+
+echo ">>> 4. Cleaning up core Kubernetes directories..."
+sudo rm -rf /etc/kubernetes/manifests
 sudo rm -rf /var/lib/etcd
 sudo rm -rf /var/lib/kubelet
-sudo rm -rf $HOME/.kube
 
-echo ">>> Flushing iptables..."
-sudo iptables -F
-sudo iptables -t nat -F
-sudo iptables -t mangle -F
-sudo iptables -X
-
-echo ">>> Cleaning up CNI interfaces..."
-# Attempt to remove common CNI interfaces if they exist
-sudo ip link delete cni0 2>/dev/null
-sudo ip link delete flannel.1 2>/dev/null
-sudo ip link delete kube-ipvs0 2>/dev/null
-sudo ip link delete dummy0 2>/dev/null
-
-echo ">>> Cleaning up IPVS..."
-if command -v ipvsadm &> /dev/null; then
-    sudo ipvsadm --clear
+echo ">>> 5. Handling user-level configuration (Backup)..."
+if [ -d "$HOME/.kube" ]; then
+    BACKUP_NAME="$HOME/.kube_backup_$(date +%Y%m%d_%H%M%S)"
+    mv "$HOME/.kube" "$BACKUP_NAME"
+    echo "Existing ~/.kube backed up to: $BACKUP_NAME"
 fi
 
-echo ">>> Cluster reset complete."
-echo "You can now re-initialize the cluster using '01-cluster-init.sh' on the head node,"
-echo "or join the cluster again on a worker node."
+echo ">>> 6. Restarting Kubelet service..."
+sudo systemctl restart kubelet
+
+echo "-------------------------------------------------------"
+echo "Reset complete! Etcd and Kubelet directories cleared."
+echo "Host network connection preserved."

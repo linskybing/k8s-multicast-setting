@@ -59,7 +59,8 @@ sudo systemctl enable --now kubelet
 
 # 8. Initialize the Kubernetes cluster
 # Note: If you have already run init, you might need 'sudo kubeadm reset' first
-sudo kubeadm init --pod-network-cidr=192.168.0.0/16
+# Explicitly specify the cri-socket to avoid "found multiple CRI endpoints" error
+sudo kubeadm init --pod-network-cidr=192.168.0.0/16 --cri-socket unix:///var/run/containerd/containerd.sock
 
 # 9. Set up kubeconfig for the regular user
 mkdir -p $HOME/.kube
