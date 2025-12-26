@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multicast-sender
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multicast-test-sender
+  template:
+    metadata:
+      labels:
+        app: multicast-test-sender
+      annotations:
+        k8s.v1.cni.cncf.io/networks: macvlan-conf
+    spec:
+      containers:
+      - name: sender
+        image: ros:humble-ros-base
+        env:
+        - name: PYTHONUNBUFFERED  # [關鍵] 強制即時顯示 Log
+          value: "1"
+        command: ["python3", "-c"]
+        args:
+        - |
+          import socket, time, struct, fcntl, sys
+
+          # 獲取 IP 函數
+          def get_ip(ifname):
+              try:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                  return socket.inet_ntoa(fcntl.ioctl(
+                      s.fileno(), 0x8915, struct.pack('256s', ifname[:15].encode('utf-8'))
+                  )[20:24])
+              except: return None
+
+          print("--- SENDER STARTING ---", flush=True)
+          net1_ip = get_ip('net1')
+          
+          # 綁定 net1
+          MCAST_GRP = '239.1.1.1'
+          MCAST_PORT = 7400
+          sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+          sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+          # 強制從 net1 送出
+          sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(net1_ip))
+
+          i = 0
+          while True:
+            try:
+              msg = f'Msg {i} from {net1_ip}'.encode()
+              sock.sendto(msg, (MCAST_GRP, MCAST_PORT))
+              print(f"Sent: {msg}", flush=True)
+              i += 1
+            except Exception as e:
+              print(f"Send Error: {e}", flush=True)
+            time.sleep(1)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multicast-receiver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multicast-test-receiver
+  template:
+    metadata:
+      labels:
+        app: multicast-test-receiver
+      annotations:
+        k8s.v1.cni.cncf.io/networks: macvlan-conf
+    spec:
+      containers:
+      - name: receiver
+        image: ros:humble-ros-base
+        env:
+        - name: PYTHONUNBUFFERED  # [關鍵] 強制即時顯示 Log
+          value: "1"
+        command: ["python3", "-c"]
+        args:
+        - |
+          import socket, struct, fcntl, sys
+
+          def get_ip(ifname):
+              try:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                  return socket.inet_ntoa(fcntl.ioctl(
+                      s.fileno(), 0x8915, struct.pack('256s', ifname[:15].encode('utf-8'))
+                  )[20:24])
+              except: return None
+
+          print("--- RECEIVER STARTING ---", flush=True)
+          net1_ip = get_ip('net1')
+          print(f"Listening on net1 IP: {net1_ip}", flush=True)
+          
+          MCAST_GRP = '239.1.1.1'
+          MCAST_PORT = 7400
+          sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+          sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          sock.bind(('', MCAST_PORT))
+          
+          # 加入 Multicast Group (指定介面)
+          mreq = struct.pack("4s4s", socket.inet_aton(MCAST_GRP), socket.inet_aton(net1_ip))
+          sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+          while True:
+            data, addr = sock.recvfrom(1024)
+            print(f"Received: {data.decode()} from {addr}", flush=True)

@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ros2-talker
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ros2-talker
+  template:
+    metadata:
+      labels:
+        app: ros2-talker
+      annotations:
+        k8s.v1.cni.cncf.io/networks: macvlan-conf
+    spec:
+      # [修復重點] 強制設定 DNS，解決 "Temporary failure resolving"
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 8.8.8.8
+          - 1.1.1.1
+      containers:
+      - name: ros2-talker
+        image: ros:humble-ros-base
+        command: ["/bin/bash", "-c"]
+        env:
+        - name: ROS_DOMAIN_ID
+          value: "0"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: RMW_IMPLEMENTATION
+          value: "rmw_fastrtps_cpp"
+        - name: FASTRTPS_DEFAULT_PROFILES_FILE
+          value: "/tmp/fastdds_net1.xml"
+        # 加上這個避免 apt 問問題
+        - name: DEBIAN_FRONTEND
+          value: "noninteractive"
+        args:
+        - |
+          # 1. 建立 FastDDS 設定檔 (綁定 net1)
+          echo '<?xml version="1.0" encoding="UTF-8" ?>
+          <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+              <transport_descriptors>
+                  <transport_descriptor>
+                      <transport_id>CustomUDPTransport</transport_id>
+                      <type>UDPv4</type>
+                      <interfaceWhiteList>
+                          <address>net1</address>
+                      </interfaceWhiteList>
+                  </transport_descriptor>
+              </transport_descriptors>
+              <participant profile_name="CustomInterfaceProfile" is_default_profile="true">
+                  <rtps>
+                      <userTransports>
+                          <transport_id>CustomUDPTransport</transport_id>
+                      </userTransports>
+                  </rtps>
+              </participant>
+          </profiles>' > /tmp/fastdds_net1.xml
+
+          # 2. [優化] 換成台灣源 + 強制 IPv4 (加速下載)
+          sed -i 's/archive.ubuntu.com/tw.archive.ubuntu.com/g' /etc/apt/sources.list
+          sed -i 's/security.ubuntu.com/tw.archive.ubuntu.com/g' /etc/apt/sources.list
+          
+          # FastDDS 通常內建於 humble-ros-base，其實可以跳過 apt 安裝
+          # 但如果你需要 ping 或 ip 指令，還是需要 update
+          echo "Updating apt..."
+          apt-get update -o Acquire::ForceIPv4=true || echo "Apt failed but trying to continue..."
+
+          source /opt/ros/humble/setup.bash
+          
+          echo "Talker Start (FastDDS)..."
+          ros2 topic pub /chatter std_msgs/msg/String "data: 'Hello via FastDDS'" -r 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ros2-listener
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ros2-listener
+  template:
+    metadata:
+      labels:
+        app: ros2-listener
+      annotations:
+        k8s.v1.cni.cncf.io/networks: macvlan-conf
+    spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 8.8.8.8
+          - 1.1.1.1
+      containers:
+      - name: ros2-listener
+        image: ros:humble-ros-base
+        command: ["/bin/bash", "-c"]
+        env:
+        - name: ROS_DOMAIN_ID
+          value: "0"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: RMW_IMPLEMENTATION
+          value: "rmw_fastrtps_cpp"
+        - name: FASTRTPS_DEFAULT_PROFILES_FILE
+          value: "/tmp/fastdds_net1.xml"
+        - name: DEBIAN_FRONTEND
+          value: "noninteractive"
+        args:
+        - |
+          echo '<?xml version="1.0" encoding="UTF-8" ?>
+          <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+              <transport_descriptors>
+                  <transport_descriptor>
+                      <transport_id>CustomUDPTransport</transport_id>
+                      <type>UDPv4</type>
+                      <interfaceWhiteList>
+                          <address>net1</address>
+                      </interfaceWhiteList>
+                  </transport_descriptor>
+              </transport_descriptors>
+              <participant profile_name="CustomInterfaceProfile" is_default_profile="true">
+                  <rtps>
+                      <userTransports>
+                          <transport_id>CustomUDPTransport</transport_id>
+                      </userTransports>
+                  </rtps>
+              </participant>
+          </profiles>' > /tmp/fastdds_net1.xml
+
+          sed -i 's/archive.ubuntu.com/tw.archive.ubuntu.com/g' /etc/apt/sources.list
+          sed -i 's/security.ubuntu.com/tw.archive.ubuntu.com/g' /etc/apt/sources.list
+          
+          echo "Updating apt..."
+          apt-get update -o Acquire::ForceIPv4=true || echo "Apt failed but trying to continue..."
+
+          source /opt/ros/humble/setup.bash
+          
+          echo "Listener Start (FastDDS)..."
+          ros2 topic echo /chatter

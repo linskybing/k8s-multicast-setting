@@ -1,68 +1,57 @@
 #!/bin/bash
+# 腳本用途：徹底清除 Kubernetes, CNI, Etcd 與殘留進程
+# 使用方式：sudo ./reset-cluster.sh
 
-# Kubernetes Node Reset Script (Optimized for Multus/Macvlan)
-echo "WARNING: This script will reset K8s, Multus CNI, and clear local IPAM records."
-read -p "Are you sure you want to continue? (y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Operation aborted."
-    exit 1
+# 確保以 root 執行
+if [ "$EUID" -ne 0 ]; then
+  echo "[ERROR] Please run as root."
+  exit 1
 fi
 
-# 1. Stop Kubelet to release locks
-echo ">>> 1. Stopping Kubelet service..."
-sudo systemctl stop kubelet
+echo ">>> 1. Stopping Kubernetes Services..."
+systemctl stop kubelet
+systemctl stop containerd
 
-# 2. Official kubeadm reset
-echo ">>> 2. Running kubeadm reset..."
-sudo kubeadm reset --force
+echo ">>> 2. Killing Processes & Clearing Ports..."
 
-# 3. Network Cleanup (CRITICAL for Multus/Macvlan)
-echo ">>> 3. Cleaning up CNI networking..."
+PORTS=(6443 2379 2380 10250 10257 10259)
+for port in "${PORTS[@]}"; do
+    fuser -k -n tcp "$port" >/dev/null 2>&1 || true
+done
 
-# Remove CNI configs (including Multus auto-generated files)
-sudo rm -rf /etc/cni/net.d
+killall -9 kubelet kube-proxy kube-apiserver kube-controller-manager kube-scheduler etcd containerd-shim-runc-v2 >/dev/null 2>&1 || true
 
-# [IMPORTANT] Clean up 'host-local' IPAM data
-# Your script uses "type": "host-local". It stores allocated IPs on disk.
-# If not cleared, re-installation will fail due to "IP exhaustion".
-echo "    -> Clearing host-local IPAM data..."
-sudo rm -rf /var/lib/cni/networks
+echo ">>> 3. Force Unmounting (Prevent Hangs)..."
+mount | grep '/var/lib/kubelet' | awk '{print $3}' | xargs -r umount -l
+mount | grep '/var/lib/cni' | awk '{print $3}' | xargs -r umount -l
 
-# Clean up CNI binaries (Optional, but good for a fresh Multus install)
-# sudo rm -rf /opt/cni/bin/multus
+echo ">>> 4. Running kubeadm reset..."
+kubeadm reset --force --cleanup-tmp-dir || true
 
-# Clean up legacy CNI interfaces (cni0/flannel) if used as the "default" network
-# Multus usually wraps another CNI. We clean these just in case.
-sudo ip link delete cni0 2>/dev/null
-sudo ip link delete flannel.1 2>/dev/null
-sudo ip link delete kube-ipvs0 2>/dev/null
+echo ">>> 5. Cleaning Network Artifacts..."
+rm -rf /etc/cni/net.d
+rm -rf /var/lib/cni/networks
+rm -rf /var/lib/cni/results
 
-# Flush iptables to remove old forwarding rules
-sudo iptables -F && sudo iptables -t nat -F && sudo iptables -t mangle -F && sudo iptables -X
+ip link delete cni0 >/dev/null 2>&1 || true
+ip link delete flannel.1 >/dev/null 2>&1 || true
+ip link delete kube-ipvs0 >/dev/null 2>&1 || true
+ip link delete net1 >/dev/null 2>&1 || true # Macvlan
 
-# 4. Clean up directories (Safe cleanup)
-echo ">>> 4. Removing Kubernetes files..."
-# Unmount explicitly if active mounts exist
-mount | grep '/var/lib/kubelet' | awk '{print $3}' | xargs -r sudo umount
+iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X || true
 
-sudo rm -rf /etc/kubernetes/manifests
-sudo rm -rf /var/lib/etcd
-sudo rm -rf /var/lib/kubelet
+echo ">>> 6. Removing Cluster Files..."
+rm -rf /etc/kubernetes
+rm -rf /var/lib/kubelet
+rm -rf /var/lib/etcd
+rm -rf /root/.kube
+rm -rf /home/*/.kube
 
-# 5. User Config Backup
-echo ">>> 5. Backing up user config..."
-if [ -d "$HOME/.kube" ]; then
-    BACKUP_NAME="$HOME/.kube_backup_$(date +%Y%m%d_%H%M%S)"
-    mv "$HOME/.kube" "$BACKUP_NAME"
-    echo "Backed up to: $BACKUP_NAME"
-fi
-
-# 6. Finalize
-echo ">>> 6. Reloading systemd..."
-sudo systemctl daemon-reload
+echo ">>> 7. Restarting Container Runtime..."
+systemctl start containerd
 
 echo "-------------------------------------------------------"
-echo "Reset complete."
-echo "NOTE: Since you use Multus, ensure you re-apply the 'NetworkAttachmentDefinition'"
-echo "      after the cluster is back up, as CRDs are stored in Etcd."
+echo "[SUCCESS] Cluster reset complete."
+echo "Ports 6443/2379/2380 are now free."
+echo "You can now run './install_k8s_fixed.sh'."
+echo "-------------------------------------------------------"
