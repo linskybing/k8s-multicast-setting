@@ -1,129 +1,172 @@
 #!/bin/bash
 set -e
 
-echo "=== 1. Verifying Helm Installation ==="
+# --- Configurations ---
+DATA_PATH="/data"
+HARBOR_ADMIN_PASSWORD=${HARBOR_ADMIN_PASSWORD:-"Harbor12345"}
+GRAFANA_PORT=30003
+HARBOR_PORT=30002
+
+echo "=== Production Setup: Longhorn (/data) + NFS (Auto-Wired) + Monitoring + Harbor ==="
+
+# 0. Pre-flight Check
+if [ ! -d "$DATA_PATH" ]; then
+  echo "[Error] Directory $DATA_PATH does not exist."
+  echo "Please mount your 1.8TB drive to $DATA_PATH first."
+  exit 1
+fi
+echo "[Check] Target storage path: $DATA_PATH"
+
+# 1. Helm Check
 if ! command -v helm &> /dev/null; then
-    echo "Helm not found. Installing..."
-    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-else
-    echo "Helm is already installed."
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 fi
 
-echo "=== 2. Setting up Distributed Storage (Longhorn) ==="
-# 2.1 Install Prerequisites (open-iscsi is required for Longhorn)
-echo "Installing open-iscsi and nfs-common (required for Longhorn)..."
-sudo apt-get update
-sudo apt-get install -y open-iscsi nfs-common
+# 2. Storage: Longhorn
+echo "[Storage] Installing Longhorn..."
+sudo apt-get update -qq && sudo apt-get install -y open-iscsi nfs-common
 sudo systemctl enable --now iscsid
 
-# 2.2 Install Longhorn via Helm
-echo "Adding Longhorn Helm Repository..."
 helm repo add longhorn https://charts.longhorn.io
 helm repo update
-
-echo "Installing Longhorn..."
-# We install in longhorn-system namespace
 kubectl create namespace longhorn-system --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install longhorn longhorn/longhorn \
   --namespace longhorn-system \
   --set defaultSettings.createDefaultDiskLabeledNodes=true \
-  --set defaultSettings.allowVolumeExpansion=true \
+  --set defaultSettings.defaultDataPath="$DATA_PATH" \
   --set persistence.defaultClassReplicaCount=1 \
   --set persistence.defaultClass=true
 
-echo "Waiting for Longhorn to be ready (this may take a few minutes)..."
+echo "Waiting for Longhorn Manager..."
 kubectl wait --for=condition=ready pod -l app=longhorn-manager -n longhorn-system --timeout=300s
 
-echo "Longhorn installed. You can access the UI via Service/longhorn-frontend."
+# Force Node Label (Crucial for the first node to use /data)
+CURRENT_NODE=$(kubectl get node -o jsonpath='{.items[0].metadata.name}')
+kubectl label node "$CURRENT_NODE" node.longhorn.io/create-default-disk=true --overwrite 2>/dev/null || true
 
-echo "=== 3. Adding Helm Repositories ==="
+# 3. Setup NFS Server (The Source)
+echo "[Storage] Deploying NFS Server..."
+helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner
+kubectl create namespace nfs-provisioner --dry-run=client -o yaml | kubectl apply -f -
+
+# 3.1 Deploy Internal NFS Server
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-server-pvc
+  namespace: nfs-provisioner
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: { requests: { storage: 200Gi } }
+  storageClassName: longhorn
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: nfs-server, namespace: nfs-provisioner }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: nfs-server } }
+  template:
+    metadata: { labels: { app: nfs-server } }
+    spec:
+      containers:
+      - name: nfs-server
+        image: itsthenetwork/nfs-server-alpine:latest
+        securityContext: { privileged: true }
+        env:
+        - name: SHARED_DIRECTORY
+          value: "/exports"
+        ports: [ { containerPort: 2049, name: nfs } ]
+        volumeMounts: [ { name: export, mountPath: /exports } ]
+      volumes:
+      - name: export
+        persistentVolumeClaim: { claimName: nfs-server-pvc }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: nfs-server, namespace: nfs-provisioner }
+spec:
+  selector: { app: nfs-server }
+  ports: [ { port: 2049, name: nfs } ]
+EOF
+
+echo "Waiting for NFS Server initialization..."
+kubectl -n nfs-provisioner wait --for=condition=ready pod -l app=nfs-server --timeout=180s
+
+# 3.2 Auto-Detect Service IP (General Method)
+NFS_CLUSTER_IP=""
+echo "Detecting NFS Service IP..."
+while [ -z "$NFS_CLUSTER_IP" ]; do
+  NFS_CLUSTER_IP=$(kubectl get svc -n nfs-provisioner nfs-server -o jsonpath='{.spec.clusterIP}')
+  [ -z "$NFS_CLUSTER_IP" ] && sleep 2
+done
+echo "NFS Service IP detected: $NFS_CLUSTER_IP"
+
+# 3.3 Deploy Provisioner using the Detected IP
+echo "[Storage] Wiring NFS Provisioner to $NFS_CLUSTER_IP..."
+helm upgrade --install nfs-provisioner nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
+  --namespace nfs-provisioner \
+  --set nfs.server=$NFS_CLUSTER_IP \
+  --set nfs.path=/exports \
+  --set storageClass.name=longhorn-nfs \
+  --set storageClass.create=true \
+  --set storageClass.defaultClass=false
+
+# 4. Monitoring
+echo "[Monitoring] Installing Stack..."
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo add harbor https://helm.goharbor.io
-helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
-helm repo update
-
-echo "=== 4. Installing Kube-Prometheus-Stack (Monitoring) ==="
 kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
 
-# Install Prometheus + Grafana
-# We enable serviceMonitorSelectorNilUsesHelmValues=false to allow discovering custom ServiceMonitors (like DCGM)
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
-  --set grafana.service.type=NodePort \
-  --set grafana.service.nodePort=30003 \
-  --set prometheus.service.type=NodePort \
-  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+  --reuse-values \
+  --set grafana.service.nodePort=$GRAFANA_PORT \
+  --set grafana.persistence.enabled=true \
+  --set grafana.persistence.storageClass=longhorn \
+  --set grafana.grafana\.ini.auth\.anonymous.enabled=true \
+  --set grafana.grafana\.ini.auth\.anonymous.org_role=Viewer \
+  --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=longhorn
 
-echo "Adding Detailed Pod Dashboard to Grafana..."
-curl -L -o /tmp/pod-dashboard.json https://grafana.com/api/dashboards/15760/revisions/latest/download
-# Create ConfigMap with label grafana_dashboard=1 so the sidecar picks it up
-kubectl create configmap grafana-dashboard-pods \
-  --namespace monitoring \
-  --from-file=pod-dashboard.json=/tmp/pod-dashboard.json \
-  --dry-run=client -o yaml > /tmp/dashboard.yaml
-kubectl label --local -f /tmp/dashboard.yaml grafana_dashboard=1 -o yaml | kubectl apply -f -
-rm /tmp/pod-dashboard.json /tmp/dashboard.yaml
-
-echo "=== 5. Installing DCGM Exporter (GPU Metrics) ==="
-# This exports NVIDIA GPU metrics to Prometheus
-# Note: The chart name in the official repo might vary or be deprecated.
-# We use the standard helm chart from the GPU Operator or a direct manifest if helm fails.
-# However, for standalone DCGM exporter, we can use the community chart or direct manifest.
-
-echo "Attempting to install DCGM Exporter..."
-# Using K8s Manifest (Stable and reliable for standalone)
 kubectl apply -f https://raw.githubusercontent.com/NVIDIA/dcgm-exporter/main/dcgm-exporter.yaml
 
-echo "=== 6. Installing Harbor (Registry) ==="
+# 5. Harbor (With TLS Fix)
+echo "[Registry] Installing Harbor..."
+helm repo add harbor https://helm.goharbor.io
+helm repo update
 kubectl create namespace harbor --dry-run=client -o yaml | kubectl apply -f -
+EXT_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 
-# Install Harbor
-# Note: We disable TLS for internal testing simplicity (expose.tls.enabled=false)
-# We use NodePort to expose it.
-# Optimized storage sizes for limited capacity multi-user environment
+# Note: Added expose.tls.auto.commonName=$EXT_IP to fix the "commonName required" error
 helm upgrade --install harbor harbor/harbor \
   --namespace harbor \
+  --set harborAdminPassword="$HARBOR_ADMIN_PASSWORD" \
   --set expose.type=nodePort \
   --set expose.tls.enabled=false \
-  --set externalURL=http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):30002 \
+  --set expose.tls.auto.commonName=$EXT_IP \
+  --set externalURL="http://$EXT_IP:$HARBOR_PORT" \
   --set persistence.persistentVolumeClaim.registry.storageClass=longhorn \
-  --set persistence.persistentVolumeClaim.registry.size=30Gi \
+  --set persistence.persistentVolumeClaim.registry.size=100Gi \
   --set persistence.persistentVolumeClaim.jobservice.storageClass=longhorn \
-  --set persistence.persistentVolumeClaim.jobservice.size=10Gi \
   --set persistence.persistentVolumeClaim.database.storageClass=longhorn \
-  --set persistence.persistentVolumeClaim.database.size=10Gi \
   --set persistence.persistentVolumeClaim.redis.storageClass=longhorn \
-  --set persistence.persistentVolumeClaim.redis.size=5Gi \
-  --set persistence.persistentVolumeClaim.trivy.storageClass=longhorn \
-  --set persistence.persistentVolumeClaim.trivy.size=10Gi \
-  --set harborAdminPassword=Harbor12345 \
-  --set logLevel=info \
-  --set core.gc.enabled=true \
-  --set core.gc.timeWindowHours=24 \
-  --set jobservice.jobLoggers[0]=STDERR \
-  --set jobservice.jobLoggers[1]=FILE \
-  --set jobservice.loggerSweeper.duration=720h
+  --set persistence.persistentVolumeClaim.trivy.storageClass=longhorn
 
-echo "----------------------------------------------------------------"
-echo "Installation initiated. It may take a few minutes for all pods to start."
+echo "========================================================"
+echo "   All Systems Operational"
+echo "========================================================"
+echo "1. Storage (Longhorn UI):"
+echo "   kubectl port-forward -n longhorn-system svc/longhorn-frontend 8000:80"
+echo "   -> http://localhost:8000"
+echo "   Check: Node -> Path should be /data"
 echo ""
-echo ">>> Longhorn UI Access <<<"
-echo "Access via Port-Forward:"
-echo "kubectl port-forward -n longhorn-system svc/longhorn-frontend 8000:80"
-echo "(Then open http://localhost:8000)"
+echo "2. Monitoring (Grafana):"
+echo "   URL:  http://$EXT_IP:$GRAFANA_PORT"
 echo ""
-echo ">>> Grafana Access <<<"
-echo "Get Admin Password:"
-echo "kubectl get secret --namespace monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 --decode ; echo"
-echo "Access via NodePort:"
-echo "http://<NodeIP>:30003"
-echo ""
-echo ">>> Harbor Access <<<"
-echo "Default User: admin"
-echo "Default Pass: Harbor12345"
-echo "Access via NodePort:"
-echo "http://<NodeIP>:30002"
-echo "----------------------------------------------------------------"
+echo "3. Registry (Harbor):"
+echo "   URL:  http://$EXT_IP:$HARBOR_PORT"
+echo "   User: admin / $HARBOR_ADMIN_PASSWORD"
+echo "========================================================"
 
-# kubectl get secret --namespace monitoring kube-prometheus-stack-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+# kubectl get secret --namespace monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 --decode ; echo

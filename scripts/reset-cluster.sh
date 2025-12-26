@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Gentle Kubernetes Node Reset Script (v3 - Force Etcd Cleanup)
-echo "WARNING: This script will reset Kubernetes configuration on this node."
+# Kubernetes Node Reset Script (Optimized for Multus/Macvlan)
+echo "WARNING: This script will reset K8s, Multus CNI, and clear local IPAM records."
 read -p "Are you sure you want to continue? (y/N) " -n 1 -r
 echo
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -9,36 +9,60 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
-echo ">>> 1. Running official kubeadm reset..."
-sudo kubeadm reset -f
+# 1. Stop Kubelet to release locks
+echo ">>> 1. Stopping Kubelet service..."
+sudo systemctl stop kubelet
 
-echo ">>> 2. Cleaning up CNI configuration files..."
+# 2. Official kubeadm reset
+echo ">>> 2. Running kubeadm reset..."
+sudo kubeadm reset --force
+
+# 3. Network Cleanup (CRITICAL for Multus/Macvlan)
+echo ">>> 3. Cleaning up CNI networking..."
+
+# Remove CNI configs (including Multus auto-generated files)
 sudo rm -rf /etc/cni/net.d
 
-echo ">>> 3. Forcing release of busy directories..."
-# Lazy unmount (-l) detaches the filesystem now, and cleans up references later.
-# This is much safer than a hardware-level 'force' which can crash the system.
-sudo umount -l /var/lib/etcd 2>/dev/null
-sudo umount -l /var/lib/kubelet 2>/dev/null
+# [IMPORTANT] Clean up 'host-local' IPAM data
+# Your script uses "type": "host-local". It stores allocated IPs on disk.
+# If not cleared, re-installation will fail due to "IP exhaustion".
+echo "    -> Clearing host-local IPAM data..."
+sudo rm -rf /var/lib/cni/networks
 
-# Small sleep to allow the kernel to update the file descriptors
-sleep 2
+# Clean up CNI binaries (Optional, but good for a fresh Multus install)
+# sudo rm -rf /opt/cni/bin/multus
 
-echo ">>> 4. Cleaning up core Kubernetes directories..."
+# Clean up legacy CNI interfaces (cni0/flannel) if used as the "default" network
+# Multus usually wraps another CNI. We clean these just in case.
+sudo ip link delete cni0 2>/dev/null
+sudo ip link delete flannel.1 2>/dev/null
+sudo ip link delete kube-ipvs0 2>/dev/null
+
+# Flush iptables to remove old forwarding rules
+sudo iptables -F && sudo iptables -t nat -F && sudo iptables -t mangle -F && sudo iptables -X
+
+# 4. Clean up directories (Safe cleanup)
+echo ">>> 4. Removing Kubernetes files..."
+# Unmount explicitly if active mounts exist
+mount | grep '/var/lib/kubelet' | awk '{print $3}' | xargs -r sudo umount
+
 sudo rm -rf /etc/kubernetes/manifests
 sudo rm -rf /var/lib/etcd
 sudo rm -rf /var/lib/kubelet
 
-echo ">>> 5. Handling user-level configuration (Backup)..."
+# 5. User Config Backup
+echo ">>> 5. Backing up user config..."
 if [ -d "$HOME/.kube" ]; then
     BACKUP_NAME="$HOME/.kube_backup_$(date +%Y%m%d_%H%M%S)"
     mv "$HOME/.kube" "$BACKUP_NAME"
-    echo "Existing ~/.kube backed up to: $BACKUP_NAME"
+    echo "Backed up to: $BACKUP_NAME"
 fi
 
-echo ">>> 6. Restarting Kubelet service..."
-sudo systemctl restart kubelet
+# 6. Finalize
+echo ">>> 6. Reloading systemd..."
+sudo systemctl daemon-reload
 
 echo "-------------------------------------------------------"
-echo "Reset complete! Etcd and Kubelet directories cleared."
-echo "Host network connection preserved."
+echo "Reset complete."
+echo "NOTE: Since you use Multus, ensure you re-apply the 'NetworkAttachmentDefinition'"
+echo "      after the cluster is back up, as CRDs are stored in Etcd."

@@ -1,71 +1,148 @@
 #!/bin/bash
 set -e
 
-echo "=== Configuring Grafana for Public Access & Namespace Monitoring ==="
+# ==============================================================================
+# Production Monitoring Setup: GPU + K8s
+# Scope:
+# 1. Configures Grafana (Public Access, Persistence)
+# 2. Installs NVIDIA DCGM Exporter (The Metric Source)
+# 3. Creates ServiceMonitor ( The Bridge for Prometheus to scrape GPU metrics)
+# 4. Installs Production Dashboards (GPU, Namespace, Compute)
+# ==============================================================================
 
-# 1. Enable Anonymous Access (Public View)
-echo "Enabling Anonymous Access (Viewer Role)..."
-# We use --reuse-values to preserve existing NodePort and other settings
+# NodePort for external access
+GRAFANA_PORT=30003
+
+echo "=== Starting Complete Monitoring Stack Configuration ==="
+
+# ------------------------------------------------------------------------------
+# 1. Update Grafana Configuration (Helm)
+# ------------------------------------------------------------------------------
+echo "[STEP 1] Updating Grafana Settings..."
+
+# We use --reuse-values to preserve existing Prometheus/AlertManager settings
+# while strictly enforcing Grafana's persistence and access policies.
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --reuse-values \
+  --set grafana.service.nodePort=$GRAFANA_PORT \
+  --set grafana.persistence.enabled=true \
+  --set grafana.persistence.storageClass=longhorn \
   --set grafana.grafana\.ini.auth\.anonymous.enabled=true \
-  --set grafana.grafana\.ini.auth\.anonymous.org_role=Viewer
+  --set grafana.grafana\.ini.auth\.anonymous.org_role=Viewer \
+  --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=longhorn
 
-# 2. Add Namespace Dashboards
-echo "Adding Kubernetes Namespace Dashboards..."
+echo "[INFO] Waiting for Grafana to reload settings..."
+kubectl rollout status deployment kube-prometheus-stack-grafana -n monitoring --timeout=120s
 
-# Dashboard 1: Kubernetes / Views / Namespaces (ID: 15758)
-# Provides a high-level overview of namespace health and resources
-echo "Downloading Dashboard: Views / Namespaces..."
-curl -L -o /tmp/ns-view.json https://grafana.com/api/dashboards/15758/revisions/latest/download
+# ------------------------------------------------------------------------------
+# 2. Install NVIDIA DCGM Exporter
+# ------------------------------------------------------------------------------
+echo "[STEP 2] Ensuring NVIDIA DCGM Exporter is installed..."
+# This pod runs on the GPU node and exposes metrics on port 9400
+kubectl apply -f https://raw.githubusercontent.com/NVIDIA/dcgm-exporter/main/dcgm-exporter.yaml
 
-kubectl create configmap grafana-dashboard-ns-view \
-  --namespace monitoring \
-  --from-file=ns-view.json=/tmp/ns-view.json \
-  --dry-run=client -o yaml > /tmp/ns-view-cm.yaml
-kubectl label --local -f /tmp/ns-view-cm.yaml grafana_dashboard=1 -o yaml | kubectl apply -f -
+# ------------------------------------------------------------------------------
+# 3. Create ServiceMonitor (CRITICAL FIX for 'No Data')
+# ------------------------------------------------------------------------------
+echo "[STEP 3] Creating ServiceMonitor for Prometheus..."
+# Without this, Prometheus does not know how to scrape the DCGM exporter.
 
-# Dashboard 2: Kubernetes / Compute Resources / Namespace (Workloads) (ID: 15761)
-# Provides detailed CPU/Memory usage breakdown by workload in a namespace
-echo "Downloading Dashboard: Compute Resources / Namespace..."
-curl -L -o /tmp/ns-compute.json https://grafana.com/api/dashboards/15761/revisions/latest/download
+cat <<EOF | kubectl apply -f -
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dcgm-exporter
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-exporter
+  # Scan all namespaces because dcgm-exporter usually runs in 'default' or 'kube-system'
+  namespaceSelector:
+    any: true
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics
+EOF
 
-kubectl create configmap grafana-dashboard-ns-compute \
-  --namespace monitoring \
-  --from-file=ns-compute.json=/tmp/ns-compute.json \
-  --dry-run=client -o yaml > /tmp/ns-compute-cm.yaml
-kubectl label --local -f /tmp/ns-compute-cm.yaml grafana_dashboard=1 -o yaml | kubectl apply -f -
+echo "[INFO] ServiceMonitor applied. Prometheus will pick up GPU metrics within 30 seconds."
 
-# Dashboard 3: Kubernetes Cluster (Prometheus) (ID: 6417)
-# Provides a clear "Top Pods" view by CPU and Memory
-echo "Downloading Dashboard: Cluster Top Pods (ID: 6417)..."
-curl -L -o /tmp/cluster-top.json https://grafana.com/api/dashboards/6417/revisions/latest/download
+# ------------------------------------------------------------------------------
+# 4. Install Dashboards (Infrastructure as Code)
+# ------------------------------------------------------------------------------
+echo "[STEP 4] Installing Production Dashboards..."
 
-kubectl create configmap grafana-dashboard-cluster-top \
-  --namespace monitoring \
-  --from-file=cluster-top.json=/tmp/cluster-top.json \
-  --dry-run=client -o yaml > /tmp/cluster-top-cm.yaml
-kubectl label --local -f /tmp/cluster-top-cm.yaml grafana_dashboard=1 -o yaml | kubectl apply -f -
+# Function to download, fix datasource, and install dashboards via ConfigMap
+install_dashboard() {
+    local ID=$1
+    local NAME=$2
+    local FILE="/tmp/${NAME}.json"
+    
+    echo "[INFO] Processing Dashboard: $NAME (ID: $ID)..."
+    
+    # 1. Download JSON from Grafana.com
+    curl -sL -o "$FILE" "https://grafana.com/api/dashboards/${ID}/revisions/latest/download"
+    
+    # 2. Fix Datasource Variables
+    # Many community dashboards use hardcoded or variable datasource names that cause "No Data" errors.
+    # We force them to use the default "Prometheus" datasource.
+    sed -i 's/"datasource": *"[^"]*"/"datasource": "Prometheus"/g' "$FILE"
+    sed -i 's/${DS_PROMETHEUS}/Prometheus/g' "$FILE"
 
-# Cleanup
-rm /tmp/ns-view.json /tmp/ns-view-cm.yaml /tmp/ns-compute.json /tmp/ns-compute-cm.yaml /tmp/cluster-top.json /tmp/cluster-top-cm.yaml
+    # 3. Create ConfigMap with "grafana_dashboard=1" label
+    # The Grafana sidecar automatically detects this label and imports the dashboard.
+    kubectl create configmap "grafana-dashboard-${NAME}" \
+      --namespace monitoring \
+      --from-file="${NAME}.json=${FILE}" \
+      --dry-run=client -o yaml | \
+      kubectl label --local -f - grafana_dashboard=1 -o yaml | \
+      kubectl apply -f -
+      
+    rm "$FILE"
+}
 
-# 3. Get Node IP
+# --- Dashboard List ---
+
+# 1. NVIDIA DCGM Exporter (GPU Metrics)
+# Shows Temperature, Power Usage, Memory, and Utilization per GPU
+install_dashboard 12239 "nvidia-gpu"
+
+# 2. K8s / Views / Namespaces
+# High-level overview of all namespaces
+install_dashboard 15758 "ns-view"
+
+# 3. K8s / Compute Resources / Namespace
+# Detailed CPU/Memory breakdown by Pod/Workload
+install_dashboard 15761 "ns-compute"
+
+# 4. Kubernetes Cluster (Top Pods)
+# Ranking of most resource-intensive pods
+install_dashboard 6417 "cluster-top"
+
+# ------------------------------------------------------------------------------
+# Summary Output
+# ------------------------------------------------------------------------------
+# Get Node IP for display
 NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 
-echo "----------------------------------------------------------------"
-echo "Configuration Complete!"
-echo "Grafana is now publicly accessible (No Login Required)."
+echo "========================================================"
+echo "   Dashboard & GPU Monitoring Setup Complete"
+echo "========================================================"
+echo "Grafana Access:"
+echo "   URL: http://$NODE_IP:$GRAFANA_PORT"
+echo "   Auth: Anonymous (No login required)"
 echo ""
-echo "Namespace Overview Dashboard:"
-echo "http://$NODE_IP:30003/d/k8s-views-namespaces?orgId=1&refresh=10s"
+echo "Direct Links:"
+echo "   [GPU] NVIDIA Metrics:"
+echo "   http://$NODE_IP:$GRAFANA_PORT/d/nvidia-gpu?orgId=1&refresh=5s"
 echo ""
-echo "Detailed Compute Resources (CPU/Memory) by Namespace:"
-echo "http://$NODE_IP:30003/d/k8s-resources-namespace?orgId=1&refresh=10s"
+echo "   [K8s] Namespace Overview:"
+echo "   http://$NODE_IP:$GRAFANA_PORT/d/k8s-views-namespaces?orgId=1&refresh=10s"
 echo ""
-echo "Cluster Top Pods (Resource Hogs):"
-echo "http://$NODE_IP:30003/d/1/kubernetes-cluster-prometheus?orgId=1&refresh=10s&var-datasource=default&var-cluster=default"
-echo ""
-echo "Use the 'Namespace' dropdown at the top of the dashboard to select your namespace."
-echo "----------------------------------------------------------------"
+echo "   [K8s] Workload Resources:"
+echo "   http://$NODE_IP:$GRAFANA_PORT/d/k8s-resources-namespace?orgId=1&refresh=10s"
+echo "========================================================"
