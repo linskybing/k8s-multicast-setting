@@ -2,51 +2,58 @@
 set -e
 
 # ==============================================================================
-# Containerd Registry Configuration Script
-# Scope: Configures containerd to trust insecure (HTTP) Harbor registry
-# Target: Must be run on ALL nodes (Master & Workers)
+# SCRIPT: Production Containerd Registry Config
+# SCOPE:  Configures Containerd to trust insecure Harbor (HTTP)
+# SAFETY: Includes backup & auto-rollback on failure
 # ==============================================================================
 
-# 1. Configuration
-# Default to your specific Master IP if not provided as argument
-HARBOR_IP=${1:-"10.121.124.10"}
+# --- Configuration ---
+HARBOR_IP=${1:-"192.168.109.1"}
 HARBOR_PORT="30002"
 REGISTRY_URL="http://$HARBOR_IP:$HARBOR_PORT"
+
 CONFIG_FILE="/etc/containerd/config.toml"
 BACKUP_FILE="$CONFIG_FILE.bak.$(date +%F_%T)"
+CERTS_BASE_DIR="/etc/containerd/certs.d"
 
-echo "=== Configuring Containerd for Harbor ($REGISTRY_URL) ==="
+echo ">>> Configuring Containerd for Registry: $REGISTRY_URL"
 
-# 2. Backup existing configuration (Production Safety)
-if [ -f "$CONFIG_FILE" ]; then
-    echo "[INFO] Backing up config.toml to $BACKUP_FILE..."
-    sudo cp "$CONFIG_FILE" "$BACKUP_FILE"
-else
-    echo "[ERROR] $CONFIG_FILE not found! Is containerd installed?"
-    exit 1
+# --- 1. Validation & Backup ---
+
+# Generate default config if missing (common on some K8s distros)
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "[WARN] No config found. Generating default..."
+    sudo mkdir -p /etc/containerd
+    sudo containerd config default | sudo tee "$CONFIG_FILE" > /dev/null
 fi
 
-# 3. Update config.toml to enable certs.d directory
-# We use a robust regex to find 'config_path', even if it is commented out or has existing values.
-echo "[STEP 1] Updating config_path in $CONFIG_FILE..."
+# Create Backup
+echo "[INFO] Backing up current config to $BACKUP_FILE"
+sudo cp "$CONFIG_FILE" "$BACKUP_FILE"
 
-# Check if we need to modify it
-if grep -q 'config_path = "/etc/containerd/certs.d"' "$CONFIG_FILE"; then
-    echo "[INFO] config_path is already set correctly."
+# --- 2. Update config.toml ---
+
+# We only replace 'config_path = ""' to ensure we target the default registry setting
+# and avoid accidentally breaking other plugins (Production Safety).
+if grep -q 'config_path = ""' "$CONFIG_FILE"; then
+    echo "[INFO] Updating registry config path..."
+    sudo sed -i 's|config_path = ""|config_path = "/etc/containerd/certs.d"|g' "$CONFIG_FILE"
+elif grep -q 'config_path = "/etc/containerd/certs.d"' "$CONFIG_FILE"; then
+    echo "[INFO] Config path already set. Skipping."
 else
-    # This sed command searches for any line containing "config_path =" inside the [plugins] section
-    # and forces it to the correct directory. It handles indented lines too.
-    sudo sed -i 's|.*config_path = .*|      config_path = "/etc/containerd/certs.d"|g' "$CONFIG_FILE"
-    echo "[INFO] config_path updated."
+    echo "[WARN] unexpected config_path found. Manual check recommended."
 fi
 
-# 4. Create hosts.toml for the registry
-# Containerd 1.5+ uses this structure to define registry capabilities and mirror settings
-CERTS_DIR="/etc/containerd/certs.d/$HARBOR_IP:$HARBOR_PORT"
-echo "[STEP 2] Creating registry config in $CERTS_DIR..."
-sudo mkdir -p "$CERTS_DIR"
+# --- 3. Create Registry Host Config ---
 
-cat <<EOF | sudo tee "$CERTS_DIR/hosts.toml" > /dev/null
+# Define directory for this specific registry
+TARGET_DIR="$CERTS_BASE_DIR/$HARBOR_IP:$HARBOR_PORT"
+sudo mkdir -p "$TARGET_DIR"
+
+echo "[INFO] Writing hosts.toml to $TARGET_DIR..."
+
+# 'skip_verify = true' is required for HTTP/Insecure registries
+cat <<EOF | sudo tee "$TARGET_DIR/hosts.toml" > /dev/null
 server = "$REGISTRY_URL"
 
 [host."$REGISTRY_URL"]
@@ -54,17 +61,20 @@ server = "$REGISTRY_URL"
   skip_verify = true
 EOF
 
-# 5. Restart Containerd
-echo "[STEP 3] Restarting containerd service..."
+# --- 4. Restart & Health Check ---
+
+echo "[INFO] Restarting Containerd..."
 sudo systemctl restart containerd
 
-# 6. Verification
-echo "----------------------------------------------------------------"
-echo "Configuration Complete!"
-echo "Registry: $REGISTRY_URL"
-echo "Config:   $CERTS_DIR/hosts.toml"
-echo ""
-echo "To verify connectivity, try pulling an image manually on this node:"
-echo "  sudo crictl pull $HARBOR_IP:$HARBOR_PORT/library/hello-world:latest"
-echo "  (Note: You need to push an image to Harbor first)"
-echo "----------------------------------------------------------------"
+# Verify service health. If failed, rollback immediately.
+if systemctl is-active --quiet containerd; then
+    echo "Success! Containerd is running."
+    echo "   Registry configured at: $TARGET_DIR/hosts.toml"
+else
+    echo "[CRITICAL] Containerd failed to start."
+    echo "   Restoring configuration from backup..."
+    sudo cp "$BACKUP_FILE" "$CONFIG_FILE"
+    sudo systemctl restart containerd
+    echo "   Rollback complete. System returned to previous state."
+    exit 1
+fi

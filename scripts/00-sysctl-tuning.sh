@@ -3,6 +3,14 @@ set -e
 
 echo "=== Tuning System Parameters for Kubernetes & Longhorn (Production) ==="
 
+# 0. [CRITICAL] Disable Swap Permanently (Fixes K8s reboot failure)
+echo ">>> Disabling Swap permanently..."
+# Turn off swap immediately
+sudo swapoff -a
+# Comment out swap partitions in /etc/fstab to prevent mounting on reboot
+# This ensures Kubelet starts correctly after every reboot
+sudo sed -i '/swap/ s/^/#/' /etc/fstab || true
+
 # 1. Load required kernel modules first (Critical for networking)
 echo ">>> Loading kernel modules..."
 cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
@@ -44,8 +52,23 @@ EOF
 echo ">>> Applying sysctl changes..."
 sudo sysctl --system
 
-# 4. Longhorn Specific Check (Reminder)
+# 4. Enable Services to Start on Boot (Fixes 'connection refused' after reboot)
+echo ">>> Enabling Kubelet & Containerd auto-start..."
+sudo systemctl daemon-reload
+sudo systemctl enable kubelet
+sudo systemctl enable containerd
+# If Docker is installed, enable it too (optional)
+if systemctl list-unit-files | grep -q docker.service; then
+  sudo systemctl enable docker
+fi
+
+# 5. Install Longhorn Dependencies (Auto-install)
+echo ">>> Installing dependencies for Longhorn (iSCSI & NFS)..."
+sudo apt-get update
+sudo apt-get install -y open-iscsi nfs-common
+# Ensure iscsid service is running (Required by Longhorn)
+sudo systemctl enable --now iscsid
+
 echo "-------------------------------------------------------"
-echo "System tuning complete."
-echo "NOTE for Longhorn: Ensure 'open-iscsi' and 'nfs-common' are installed on this host."
-echo "Command: sudo apt-get install -y open-iscsi nfs-common (for Ubuntu/Debian)"
+echo "System tuning & Initialization complete!"
+echo "Status: Swap Disabled | Modules Loaded | Services Enabled | Deps Installed"
