@@ -2,90 +2,125 @@
 set -e
 
 # --- Configuration ---
+# Use standard 'nvidia.com/gpu' to allow automatic exclusion
+RESOURCE_NAME="nvidia.com/gpu"
 REPLICAS=${1:-20}
-RESOURCE_NAME=${2:-"nvidia.com/gpu"}
-RENAME_TO=${3:-"nvidia.com/gpu.shared"}
-RAW_NODE_NAME=${4:-$(hostname)}
-NODE_NAME=$(echo "$RAW_NODE_NAME" | tr '[:upper:]' '[:lower:]')
 
 echo "========================================================"
-echo "   NVIDIA GPU Setup: Safe Configuration Mode            "
+echo "   NVIDIA GPU Setup: MPS Mode (Fixed)"
+echo "   Strategy: MPS (Logical Isolation)"
+echo "   Replicas per GPU: $REPLICAS"
 echo "========================================================"
 
-# --- 1. Clean up Host State ---
-echo "[Step 1] Cleaning up GPU state..."
-sudo nvidia-smi -c 0 || true
+# --- Helper Functions ---
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
 
-# --- 2. Install/Update Nvidia Container Toolkit ---
+# --- 1. Driver Installation (Headless/Server) ---
+echo "[Step 1] Checking NVIDIA Drivers..."
+
+if command_exists nvidia-smi; then
+    CURRENT_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)
+    echo "Driver detected: v$CURRENT_DRIVER"
+else
+    echo "No driver detected. Installing recommended server driver..."
+    sudo apt-get update
+    sudo apt-get install -y ubuntu-drivers-common
+    RECOMMENDED_DRIVER=$(ubuntu-drivers devices | grep "recommended" | awk '{print $3}')
+    
+    if [ -z "$RECOMMENDED_DRIVER" ]; then
+        echo "Error: Could not detect a recommended driver. Install manually."
+        exit 1
+    fi
+    sudo apt-get install -y "$RECOMMENDED_DRIVER"
+    echo "DRIVER INSTALLED. REBOOT REQUIRED. Please reboot and re-run."
+    exit 0
+fi
+
+# --- 2. Configure NVIDIA Container Toolkit ---
 echo "[Step 2] Configuring Container Runtime..."
 
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
   && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
   sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
 
 sudo apt-get update
 sudo apt-get install -y nvidia-container-toolkit
-
-echo "Configuring Containerd with nvidia-ctk..."
 sudo nvidia-ctk runtime configure --runtime=containerd --set-as-default
-
-# Restart Services
-echo "Restarting Containerd & Kubelet..."
 sudo systemctl restart containerd
-sudo systemctl restart kubelet
 
-# --- Wait for Node Readiness ---
-echo ">>> Waiting for Node to be Ready..."
-for i in {1..60}; do
-    if kubectl get nodes &> /dev/null; then
-        echo "Kubernetes API is UP!"
+# --- 3. Kubernetes Connectivity Check ---
+echo "[Step 3] Checking Kubernetes Connectivity..."
+if ! command_exists kubectl; then
+    echo "Error: kubectl not found."
+    exit 1
+fi
+
+echo "Waiting for Kubelet..."
+for i in {1..30}; do
+    if sudo systemctl is-active --quiet kubelet; then
         break
     fi
-    echo "Waiting for API server... ($i/60)"
     sleep 2
 done
 
-# --- 3. Install Helm ---
-echo "[Step 3] Ensuring Helm is installed..."
-if ! command -v helm &> /dev/null; then
+# --- 4. Install Helm ---
+echo "[Step 4] Checking Helm..."
+if ! command_exists helm; then
     curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 fi
 
-# --- 4. Deploy Device Plugin ---
-echo "[Step 4] Deploying Device Plugin..."
+# --- 5. Deploy Device Plugin with MPS ---
+echo "[Step 5] Deploying NVIDIA Device Plugin (MPS)..."
 
-# Clean old installation
+# Clean up previous install to avoid conflicts
 helm uninstall nvidia-device-plugin -n kube-system 2>/dev/null || true
-sleep 5
+sleep 3
 
-# Prepare Values
-VALUES_FILE="/tmp/nvidia-values.yaml"
+# Prepare values.yaml
+# FIX: We removed 'config.name'. We only provide 'config.map'.
+VALUES_FILE="/tmp/nvidia-mps-values.yaml"
+
 cat <<EOF > "$VALUES_FILE"
 config:
   map:
     default: |-
       version: v1
       sharing:
-        timeSlicing:
+        mps:
           resources:
             - name: $RESOURCE_NAME
               replicas: $REPLICAS
-              rename: $RENAME_TO
 compatWithCPUManager: true
+gfd:
+  enabled: true
 EOF
 
+echo "Generated Configuration:"
+cat "$VALUES_FILE"
+
+# Add Repo and Install
 helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
 helm repo update
 
+echo "Applying Helm Chart..."
 helm upgrade --install nvidia-device-plugin nvdp/nvidia-device-plugin \
   --namespace kube-system \
   --create-namespace \
-  --version 0.14.5 \
   -f "$VALUES_FILE" \
   --wait
 
 echo "========================================================"
 echo "Setup Complete."
-echo "If you have 4 GPUs, you should see total capacity: $(( 4 * REPLICAS ))"
+echo "--------------------------------------------------------"
+echo "Total Capacity: $(kubectl get node $(hostname | tr '[:upper:]' '[:lower:]') -o jsonpath='{.status.capacity}' | grep $RESOURCE_NAME)"
+echo ""
+echo "USAGE (4 GPUs Example):"
+echo "1. Dedicated (Takes 1 Full Physical Card):"
+echo "   resources: { $RESOURCE_NAME: $REPLICAS }"
+echo ""
+echo "2. Shared (Takes 1 Slice via MPS):"
+echo "   resources: { $RESOURCE_NAME: 1 }"
 echo "========================================================"
