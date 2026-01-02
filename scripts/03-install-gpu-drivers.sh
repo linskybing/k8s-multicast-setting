@@ -13,12 +13,18 @@ MPS_RESOURCE_REPLICAS=$REPLICAS
 if [ "$MPS_RESOURCE_REPLICAS" -lt 2 ]; then
   MPS_RESOURCE_REPLICAS=2
 fi
+
+# Validate args
 if [ -z "$CUSTOM_PREFIX" ] || [ -z "$TARGET_NODE" ] || [ -z "$PLUGIN_IMAGE_REPO" ]; then
-  echo "[ERROR] Usage: sudo ./03-install-gpu-drivers.sh <replicas> <resource-prefix> <node-name> <image-repo> [image-tag]"
-  echo "Example: sudo ./03-install-gpu-drivers.sh 20 mps gpu1 ghcr.io/you/k8s-device-plugin v0.1.0"
+  echo "[ERROR] Usage: ./03-install-gpu-drivers.sh <replicas> <resource-prefix> <node-name|all> <image-repo> [image-tag]"
+  echo "Example: ./03-install-gpu-drivers.sh 20 gpu gpu1 docker.io/library/k8s-device-plugin mps-individual"
+  echo "Example (all nodes): ./03-install-gpu-drivers.sh 20 gpu all docker.io/library/k8s-device-plugin mps-individual"
   echo "Hint: You can also set env PLUGIN_IMAGE_REPO and PLUGIN_IMAGE_TAG instead of passing args 4/5."
   exit 1
 fi
+
+# Detect GPU count for per-GPU MPS entries
+NUM_GPUS=$(nvidia-smi -L | wc -l)
 echo "========================================================"
 echo "Strategy: JSON Patch + Kubectl Wait"
 echo "Target Node: $TARGET_NODE"
@@ -62,29 +68,29 @@ kubectl delete daemonset nvidia-device-plugin nvidia-device-plugin-mps-control-d
 kubectl delete configmap nvidia-device-plugin-config nvidia-device-plugin-configs -n kube-system 2>/dev/null || true
 sudo rm -f /var/lib/kubelet/device-plugins/nvidia.sock 2>/dev/null || true
 kubectl label node "$TARGET_NODE" nvidia.com/mps.capable- 2>/dev/null || true
-# kubectl patch node "$TARGET_NODE" --type=json --subresource=status -p='[{"op":"remove","path":"/status/capacity/nvidia.com~1mps-0"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-1"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-2"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-3"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-0"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-1"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-2"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-3"}]' 2>/dev/null || true
-# kubectl patch node "$TARGET_NODE" --type=json --subresource=status -p='[
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-0"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-1"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-2"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-3"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu.shared"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-0"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-1"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-2"},
-#   {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-3"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-0"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-1"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-2"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-3"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu.shared"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-0"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-1"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-2"},
-#   {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-3"}
-# ]' 2>/dev/null || true
+kubectl patch node "$TARGET_NODE" --type=json --subresource=status -p='[{"op":"remove","path":"/status/capacity/nvidia.com~1mps-0"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-1"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-2"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-3"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-0"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-1"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-2"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-3"}]' 2>/dev/null || true
+kubectl patch node "$TARGET_NODE" --type=json --subresource=status -p='[
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-0"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-1"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-2"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-3"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu.shared"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-0"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-1"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-2"},
+  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-3"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-0"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-1"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-2"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-3"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu.shared"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-0"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-1"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-2"},
+  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-3"}
+]' 2>/dev/null || true
 
 echo "Waiting for old pods to terminate..."
 kubectl delete pod -n kube-system -l app.kubernetes.io/name=nvidia-device-plugin --force --grace-period=0 2>/dev/null || true
@@ -92,12 +98,18 @@ kubectl wait --for=delete pod -n kube-system -l app.kubernetes.io/name=nvidia-de
 
 echo "[Step 3b] Resetting kubelet device-plugin state..."
 if command -v systemctl >/dev/null 2>&1; then
-  sudo systemctl stop kubelet || true
-  sudo rm -f /var/lib/kubelet/device-plugins/nvidia*.sock 2>/dev/null || true
-  sudo rm -f /var/lib/kubelet/device-plugins/kubelet_internal_checkpoint 2>/dev/null || true
-  sudo rm -f /var/lib/kubelet/device-plugins/*.json 2>/dev/null || true
-  sudo systemctl start kubelet || true
-  kubectl wait --for=condition=Ready node/$TARGET_NODE --timeout=120s 2>/dev/null || true
+  if [ "$TARGET_NODE" = "all" ]; then
+    echo "Resetting kubelet on all GPU nodes (requires SSH access or manual restart)..."
+    # For multi-node, you may need to SSH to each node or use ansible/pssh
+    echo "[WARN] Multi-node kubelet restart not automated. Please restart kubelet on each GPU node manually if needed."
+  else
+    sudo systemctl stop kubelet || true
+    sudo rm -f /var/lib/kubelet/device-plugins/nvidia*.sock 2>/dev/null || true
+    sudo rm -f /var/lib/kubelet/device-plugins/kubelet_internal_checkpoint 2>/dev/null || true
+    sudo rm -f /var/lib/kubelet/device-plugins/*.json 2>/dev/null || true
+    sudo systemctl start kubelet || true
+    kubectl wait --for=condition=Ready node/$TARGET_NODE --timeout=120s 2>/dev/null || true
+  fi
 else
   echo "[WARN] systemctl not found; please manually restart kubelet and clear /var/lib/kubelet/device-plugins if stale resources persist."
 fi
@@ -119,22 +131,6 @@ config:
       version: v1
       flags:
         migStrategy: none
-      sharing:
-        mps:
-          renameByDefault: false
-          failRequestsGreaterThanOne: true
-          resources:
-            - name: nvidia.com/mps
-              replicas: $MPS_RESOURCE_REPLICAS
-              devices:
-EOF
-
-NUM_GPUS=$(nvidia-smi -L | wc -l)
-for (( i=0; i<NUM_GPUS; i++ )); do
-  printf '                - "%s"\n' "$i" >> "$VALUES_FILE"
-done
-
-cat <<EOF >> "$VALUES_FILE"
       individualGPU:
         enabled: true
         namePattern: ${CUSTOM_PREFIX}-%d
@@ -159,15 +155,30 @@ gfd:
 nfd:
   enabled: false
 
+mps:
+  root: "/run/nvidia/mps"
+
 tolerations:
   - operator: Exists
 
+EOF
+
+if [ "$TARGET_NODE" != "all" ]; then
+  cat <<EOF >> "$VALUES_FILE"
 nodeSelector:
   kubernetes.io/hostname: "$TARGET_NODE"
 EOF
+fi
 
 echo "[Step 5] Installing Helm Chart..."
-kubectl label node "$TARGET_NODE" nvidia.com/mps.capable=true --overwrite
+if [ "$TARGET_NODE" = "all" ]; then
+  echo "Labeling all GPU nodes with nvidia.com/mps.capable=true..."
+  kubectl get nodes -o json | jq -r '.items[] | select(.status.allocatable | has("nvidia.com/gpu") or has("feature.node.kubernetes.io/pci-10de.present")) | .metadata.name' | while read -r node; do
+    kubectl label node "$node" nvidia.com/mps.capable=true --overwrite
+  done
+else
+  kubectl label node "$TARGET_NODE" nvidia.com/mps.capable=true --overwrite
+fi
 helm upgrade --install nvidia-device-plugin /home/user/k8s/k8s-device-plugin/deployments/helm/nvidia-device-plugin \
   --namespace kube-system \
   --create-namespace \
@@ -179,14 +190,20 @@ kubectl rollout status ds/nvidia-device-plugin -n kube-system --timeout=120s || 
 kubectl rollout status ds/nvidia-device-plugin-mps-control-daemon -n kube-system --timeout=120s || true
 
 echo "[Step 6] Verifying Node Resources..."
-if kubectl describe node "$TARGET_NODE" | grep -q "nvidia.com/${CUSTOM_PREFIX}"; then
-  echo "--------------------------------------------------------"
-  echo "Configured Resources:"
-  kubectl describe node "$TARGET_NODE" | grep "nvidia.com/${CUSTOM_PREFIX}"
-  kubectl describe node "$TARGET_NODE" | grep "nvidia.com/mps"
-  echo "--------------------------------------------------------"
-  echo "Setup Complete."
-else
-  echo "[WARNING] Pod is running, but resources are not visible yet."
-  echo "Please check logs: kubectl logs -n kube-system -l app.kubernetes.io/name=nvidia-device-plugin"
+VERIFY_NODES="$TARGET_NODE"
+if [ "$TARGET_NODE" = "all" ]; then
+  VERIFY_NODES=$(kubectl get nodes -o json | jq -r '.items[] | select(.metadata.labels["nvidia.com/mps.capable"] == "true") | .metadata.name' | tr '\n' ' ')
 fi
+
+for node in $VERIFY_NODES; do
+  if kubectl describe node "$node" | grep -q "nvidia.com/${CUSTOM_PREFIX}"; then
+    echo "--------------------------------------------------------"
+    echo "Node: $node - Configured Resources:"
+    kubectl describe node "$node" | grep "nvidia.com/${CUSTOM_PREFIX}"
+    echo "--------------------------------------------------------"
+  else
+    echo "[WARNING] Node $node: Resources not visible yet."
+    echo "Please check logs: kubectl logs -n kube-system -l app.kubernetes.io/name=nvidia-device-plugin"
+  fi
+done
+echo "Setup Complete."

@@ -1,0 +1,198 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mps-baseline
+  labels:
+    test: mps-final
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: gpu1
+  containers:
+  - name: cuda-app
+    image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    resources:
+      limits:
+        nvidia.com/gpu-1: 20
+    env:
+    - name: NVIDIA_VISIBLE_DEVICES
+      value: "1"
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        echo "=== [BASELINE 100%] Generating Code ==="
+        # Override if NVIDIA_VISIBLE_DEVICES is void (镜像默认值)
+        if [ "$NVIDIA_VISIBLE_DEVICES" = "void" ]; then
+          export NVIDIA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
+          echo "[WARN] Overriding NVIDIA_VISIBLE_DEVICES from void to $CUDA_VISIBLE_DEVICES"
+        fi
+        echo "[DEBUG] Final CUDA env:" && env | grep -E "CUDA_MPS|CUDA_VISIBLE|NVIDIA_VISIBLE"
+        echo "[DEBUG] Testing nvidia-smi:" && nvidia-smi -L
+        echo "[DEBUG] Device files:" && ls -la /dev/nvidia*
+        echo "[DEBUG] Creating simple CUDA test..."
+        cat > simple_test.cu << 'SIMPLETEST'
+        #include <cuda_runtime.h>
+        #include <stdio.h>
+        int main() {
+            int count = 0;
+            cudaError_t err = cudaGetDeviceCount(&count);
+            printf("cudaGetDeviceCount: %s (code %d), count=%d\n", cudaGetErrorString(err), err, count);
+            return 0;
+        }
+        SIMPLETEST
+        nvcc simple_test.cu -o simple_test && ./simple_test || echo "Compilation/execution failed"
+        echo "---"
+        cat <<EOF > benchmark.cu
+        #include <cuda_runtime.h>
+        #include <iostream>
+        #include <cmath>
+        #include <cstdio>
+        
+        #define N 8192 
+
+        // 錯誤檢查巨集
+        #define checkCuda(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+        inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true) {
+           if (code != cudaSuccess) {
+              fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+              if (abort) exit(code);
+           }
+        }
+
+        __global__ void heavy_kernel(float *a, int n) {
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx < n * n) {
+                float val = 0.0f;
+                for (int i = 0; i < 2000; ++i) {
+                    val += sinf(idx * i) * cosf(idx * i);
+                }
+                a[idx] = val;
+            }
+        }
+
+        int main() {
+            float *d_a;
+            size_t size = N * N * sizeof(float);
+            
+            // 檢查 malloc 是否成功
+            checkCuda(cudaMalloc(&d_a, size));
+
+            cudaEvent_t start, stop;
+            checkCuda(cudaEventCreate(&start));
+            checkCuda(cudaEventCreate(&stop));
+
+            std::cout << "Starting Baseline Benchmark..." << std::endl;
+            checkCuda(cudaEventRecord(start));
+            
+            int threads = 256;
+            int blocks = (N * N + threads - 1) / threads;
+            
+            heavy_kernel<<<blocks, threads>>>(d_a, N);
+            
+            // 檢查 Kernel Launch 是否有同步錯誤
+            checkCuda(cudaGetLastError());
+            // 檢查 Kernel 執行期間是否有錯誤
+            checkCuda(cudaDeviceSynchronize());
+            
+            checkCuda(cudaEventRecord(stop));
+            checkCuda(cudaEventSynchronize(stop));
+            
+            float milliseconds = 0;
+            checkCuda(cudaEventElapsedTime(&milliseconds, start, stop));
+
+            std::cout << "--------------------------------------" << std::endl;
+            std::cout << "Execution Time: " << milliseconds << " ms" << std::endl;
+            std::cout << "--------------------------------------" << std::endl;
+            
+            checkCuda(cudaFree(d_a));
+            return 0;
+        }
+        EOF
+        
+        nvcc benchmark.cu -o benchmark -O3 
+        ./benchmark
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mps-limited
+  labels:
+    test: mps-final
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: gpu1
+  containers:
+  - name: cuda-app
+    image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    resources:
+      limits:
+        nvidia.com/gpu-1: 4
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        echo "=== [LIMITED 20%] Generating Code ==="
+        echo "[DEBUG] CUDA env from device plugin:" && env | grep -E "CUDA_MPS|CUDA_VISIBLE"
+        cat <<EOF > benchmark.cu
+        #include <cuda_runtime.h>
+        #include <iostream>
+        #include <cmath>
+        #include <cstdio>
+        
+        #define N 8192 
+
+        #define checkCuda(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+        inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true) {
+           if (code != cudaSuccess) {
+              fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+              if (abort) exit(code);
+           }
+        }
+
+        __global__ void heavy_kernel(float *a, int n) {
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx < n * n) {
+                float val = 0.0f;
+                for (int i = 0; i < 2000; ++i) {
+                    val += sinf(idx * i) * cosf(idx * i);
+                }
+                a[idx] = val;
+            }
+        }
+
+        int main() {
+            float *d_a;
+            size_t size = N * N * sizeof(float);
+            
+            checkCuda(cudaMalloc(&d_a, size));
+
+            cudaEvent_t start, stop;
+            checkCuda(cudaEventCreate(&start));
+            checkCuda(cudaEventCreate(&stop));
+
+            std::cout << "Starting Limited Benchmark..." << std::endl;
+            checkCuda(cudaEventRecord(start));
+            
+            int threads = 256;
+            int blocks = (N * N + threads - 1) / threads;
+            heavy_kernel<<<blocks, threads>>>(d_a, N);
+            
+            checkCuda(cudaGetLastError());
+            checkCuda(cudaDeviceSynchronize());
+            
+            checkCuda(cudaEventRecord(stop));
+            checkCuda(cudaEventSynchronize(stop));
+            float milliseconds = 0;
+            checkCuda(cudaEventElapsedTime(&milliseconds, start, stop));
+
+            std::cout << "--------------------------------------" << std::endl;
+            std::cout << "Execution Time: " << milliseconds << " ms" << std::endl;
+            std::cout << "--------------------------------------" << std::endl;
+            checkCuda(cudaFree(d_a));
+            return 0;
+        }
+        EOF
+        
+        nvcc benchmark.cu -o benchmark -O3 
+        ./benchmark

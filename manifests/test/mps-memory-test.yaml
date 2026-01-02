@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mps-test-success
+  labels:
+    test: mps-limit
+spec:
+  restartPolicy: Never
+  containers:
+  - name: cuda-app
+    image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    env:
+      - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
+        value: "20"
+      - name: CUDA_MPS_PINNED_DEVICE_MEM_LIMIT
+        value: "0:6400M"
+    resources:
+      limits:
+        nvidia.com/gpu-0: 1
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        echo "Creating CUDA source code..."
+        cat <<EOF > test_alloc.cu
+        #include <cuda_runtime.h>
+        #include <iostream>
+
+        int main() {
+            size_t size = 4ULL * 1024 * 1024 * 1024;
+            void* devPtr;
+
+            std::cout << "Attempting to allocate 4GB of VRAM..." << std::endl;
+            cudaError_t err = cudaMalloc(&devPtr, size);
+
+            if (err == cudaSuccess) {
+                std::cout << "SUCCESS: 4GB allocated. MPS limit allows this." << std::endl;
+                cudaFree(devPtr);
+                return 0;
+            } else {
+                std::cerr << "FAILED: " << cudaGetErrorString(err) << std::endl;
+                return 1;
+            }
+        }
+        EOF
+
+        echo "Compiling..."
+        nvcc test_alloc.cu -o test_alloc
+        echo "Running..."
+        ./test_alloc
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mps-test-fail
+  labels:
+    test: mps-limit
+spec:
+  restartPolicy: Never
+  containers:
+  - name: cuda-app
+    image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    env:
+      - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
+        value: "20"
+      - name: CUDA_MPS_PINNED_DEVICE_MEM_LIMIT
+        value: "0:6400M"
+    resources:
+      limits:
+        nvidia.com/gpu-3: 1
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        echo "Creating CUDA source code..."
+        cat <<EOF > test_alloc.cu
+        #include <cuda_runtime.h>
+        #include <iostream>
+
+        int main() {
+            size_t size = 10ULL * 1024 * 1024 * 1024;
+            void* devPtr;
+
+            std::cout << "Attempting to allocate 10GB of VRAM..." << std::endl;
+            cudaError_t err = cudaMalloc(&devPtr, size);
+
+            if (err == cudaSuccess) {
+                std::cout << "UNEXPECTED SUCCESS: 10GB allocated. MPS limit failed!" << std::endl;
+                cudaFree(devPtr);
+                return 1;
+            } else {
+                std::cout << "EXPECTED FAILURE: " << cudaGetErrorString(err) << std::endl;
+                return 0;
+            }
+        }
+        EOF
+
+        echo "Compiling..."
+        nvcc test_alloc.cu -o test_alloc
+        echo "Running..."
+        ./test_alloc
