@@ -5,6 +5,7 @@ metadata:
   labels:
     test: mps-final
 spec:
+  runtimeClassName: nvidia
   restartPolicy: Never
   nodeSelector:
     kubernetes.io/hostname: gpu1
@@ -13,7 +14,7 @@ spec:
     image: nvidia/cuda:12.4.1-devel-ubuntu22.04
     resources:
       limits:
-        nvidia.com/gpu-1: 20
+        nvidia.com/gpu: 20
     env:
     - name: NVIDIA_VISIBLE_DEVICES
       value: "1"
@@ -120,6 +121,7 @@ metadata:
   labels:
     test: mps-final
 spec:
+  runtimeClassName: nvidia
   restartPolicy: Never
   nodeSelector:
     kubernetes.io/hostname: gpu1
@@ -128,7 +130,7 @@ spec:
     image: nvidia/cuda:12.4.1-devel-ubuntu22.04
     resources:
       limits:
-        nvidia.com/gpu-1: 4
+        nvidia.com/gpu: 1
     command: ["/bin/bash", "-c"]
     args:
       - |
