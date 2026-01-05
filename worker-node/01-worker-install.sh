@@ -7,9 +7,9 @@ K8S_VERSION="1.35"
 #   JOIN_TOKEN="<kubeadm-token>"
 #   DISCOVERY_HASH="sha256:<hash>"
 #   NODE_NAME="$(hostname)" (optional override)
-CONTROL_PLANE_ENDPOINT=${CONTROL_PLANE_ENDPOINT:-""}
-JOIN_TOKEN=${JOIN_TOKEN:-""}
-DISCOVERY_HASH=${DISCOVERY_HASH:-""}
+CONTROL_PLANE_ENDPOINT=${CONTROL_PLANE_ENDPOINT:-"192.168.109.1:6443"}
+JOIN_TOKEN=${JOIN_TOKEN:-"hths2c.x8h34ahuhfqha8gp"}
+DISCOVERY_HASH=${DISCOVERY_HASH:-"sha256:65ced94e2de0af20656bf2d1d68d567c8c3efdee3c88585fcaf8840ced41f10e"}
 NODE_NAME=${NODE_NAME:-$(hostname)}
 
 echo "=== [Phase 2] Installing Containerd & K8s v${K8S_VERSION} ==="
