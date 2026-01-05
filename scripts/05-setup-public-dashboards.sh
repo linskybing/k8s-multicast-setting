@@ -83,7 +83,7 @@ kubectl rollout status deployment kube-prometheus-stack-grafana -n $NAMESPACE --
 # ------------------------------------------------------------------------------
 echo "[STEP 4] Deploying NVIDIA DCGM Exporter..."
 # This Pod collects metrics from the GPU. It requires the GPU drivers to be already working.
-kubectl apply -f https://raw.githubusercontent.com/NVIDIA/dcgm-exporter/main/dcgm-exporter.yaml
+kubectl apply -f ../manifests/gpu/gpu-exporter.yaml -n $NAMESPACE
 
 echo "[STEP 5] Creating ServiceMonitor..."
 # This tells Prometheus "Where" to find the GPU metrics.
