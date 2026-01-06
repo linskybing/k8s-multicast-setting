@@ -15,19 +15,11 @@ spec:
     resources:
       limits:
         nvidia.com/gpu: 20
-    env:
-    - name: NVIDIA_VISIBLE_DEVICES
-      value: "1"
     command: ["/bin/bash", "-c"]
     args:
       - |
         echo "=== [BASELINE 100%] Generating Code ==="
-        # Override if NVIDIA_VISIBLE_DEVICES is void (镜像默认值)
-        if [ "$NVIDIA_VISIBLE_DEVICES" = "void" ]; then
-          export NVIDIA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
-          echo "[WARN] Overriding NVIDIA_VISIBLE_DEVICES from void to $CUDA_VISIBLE_DEVICES"
-        fi
-        echo "[DEBUG] Final CUDA env:" && env | grep -E "CUDA_MPS|CUDA_VISIBLE|NVIDIA_VISIBLE"
+        echo "[DEBUG] Initial CUDA env:" && env | grep -E "CUDA_MPS|CUDA_VISIBLE|NVIDIA_VISIBLE|GPU_QUOTA"
         echo "[DEBUG] Testing nvidia-smi:" && nvidia-smi -L
         echo "[DEBUG] Device files:" && ls -la /dev/nvidia*
         echo "[DEBUG] Creating simple CUDA test..."
@@ -124,18 +116,18 @@ spec:
   runtimeClassName: nvidia
   restartPolicy: Never
   nodeSelector:
-    kubernetes.io/hostname: gpu1
+    kubernetes.io/hostname: gpu2
   containers:
   - name: cuda-app
     image: nvidia/cuda:12.4.1-devel-ubuntu22.04
     resources:
       limits:
-        nvidia.com/gpu: 1
+        nvidia.com/gpu: 5
     command: ["/bin/bash", "-c"]
     args:
       - |
         echo "=== [LIMITED 20%] Generating Code ==="
-        echo "[DEBUG] CUDA env from device plugin:" && env | grep -E "CUDA_MPS|CUDA_VISIBLE"
+        echo "[DEBUG] CUDA env from device plugin:" && env | grep -E "CUDA_MPS|CUDA_VISIBLE|GPU_QUOTA"
         cat <<EOF > benchmark.cu
         #include <cuda_runtime.h>
         #include <iostream>
