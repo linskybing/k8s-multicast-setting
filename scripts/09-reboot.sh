@@ -28,6 +28,7 @@ sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 # 2. Clean Multus CNI (Fixes CrashLoopBackOff)
 rm -rf /run/multus/ /var/run/multus/
 rm -f /etc/cni/net.d/00-multus.conf
+rm -f /opt/cni/bin/multus-shim
 
 # 3. Clean NVIDIA MPS (Fixes connection errors)
 rm -rf /run/nvidia/mps/* /tmp/nvidia-mps/*
