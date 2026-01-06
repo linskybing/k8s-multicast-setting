@@ -92,6 +92,17 @@ kubectl -n $HARBOR_NAMESPACE create secret tls harbor-https-secret \
   --cert "$CERTS_DIR/harbor.crt"
 log "TLS Secret created in namespace: $HARBOR_NAMESPACE"
 
+# Harbor Registry Secret (for image pull jobs)
+log "Creating Harbor registry secret in default namespace..."
+kubectl delete secret harbor-regcred -n default --ignore-not-found
+kubectl create secret docker-registry harbor-regcred \
+  --docker-server="$EXT_IP:$HTTPS_NODE_PORT" \
+  --docker-username="admin" \
+  --docker-password="$HARBOR_ADMIN_PASSWORD" \
+  --docker-email="admin@example.com" \
+  -n default
+log "Registry secret created in namespace: default"
+
 step "4. Distribute CA to All Nodes (DaemonSet)"
 log "Injecting CA certificate into containerd trust store on all nodes..."
 log "Target Namespace: $INSTALLER_NAMESPACE"
@@ -270,21 +281,7 @@ kubectl rollout status deployment kube-prometheus-stack-grafana -n $MONITOR_NAME
 
 step "7. Deploy NVIDIA DCGM Exporter (GPU Metrics)"
 log "Deploying NVIDIA DCGM Exporter via Helm (Fixed Version)..."
-helm repo add dcgm https://nvidia.github.io/dcgm-exporter/helm-charts
-helm repo update
-
-helm upgrade --install dcgm-exporter dcgm/dcgm-exporter \
-  --namespace $MONITOR_NAMESPACE \
-  --create-namespace \
-  --set serviceMonitor.enabled=true \
-  --set serviceMonitor.interval="15s" \
-  --set "serviceMonitor.labels.release=prometheus" \
-  --set "tolerations[0].key=nvidia.com/gpu" \
-  --set "tolerations[0].operator=Exists" \
-  --set "tolerations[0].effect=NoSchedule" \
-  --set runtimeClassName=nvidia \
-  --set "securityContext.capabilities.add[0]=SYS_ADMIN" \
-  --wait
+kubectl apply -f ../manifests/gpu/gpu-exporter.yaml
 
 # (Optional) Manually apply ServiceMonitor if Helm chart one fails to register
 log "Ensuring ServiceMonitor is active..."
