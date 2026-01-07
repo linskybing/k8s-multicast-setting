@@ -70,7 +70,14 @@ sudo apt-get install -y kubelet kubeadm kubectl
 sudo apt-mark hold kubelet kubeadm kubectl
 sudo systemctl enable --now kubelet
 # sudo apt-mark unhold kubelet kubeadm kubectl
+
 echo "=== 4. Initialize Cluster ==="
+MASTER_25G_IP="192.168.110.101"
+sudo mkdir -p /var/lib/kubelet
+cat <<EOF | sudo tee /var/lib/kubelet/kubeadm-flags.env
+KUBELET_KUBEADM_ARGS="--node-ip=${MASTER_25G_IP}"
+EOF
+
 # Check if cluster is already initialized to avoid error
 if [ -f /etc/kubernetes/admin.conf ]; then
     echo "Cluster already initialized. Skipping kubeadm init."
@@ -88,7 +95,7 @@ PY
     exit 1
   fi
 
-  sudo kubeadm init --pod-network-cidr=$POD_CIDR --cri-socket unix:///var/run/containerd/containerd.sock
+  sudo kubeadm init --pod-network-cidr=$POD_CIDR --apiserver-advertise-address=192.168.110.101 --cri-socket unix:///var/run/containerd/containerd.sock
 fi
 
 # Setup kubeconfig for current user

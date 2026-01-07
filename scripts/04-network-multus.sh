@@ -12,6 +12,26 @@ NAD_NAMESPACE=${NAD_NAMESPACE:-default}
 # Default manifest path in repo (more portable)
 MANIFEST_PATH=${MANIFEST_PATH:-"../manifests/cni/${NAD_NAME}.yaml"}
 
+# Interconnect Network intent (internal-only):
+# - 25G: 192.168.110.X/24 for GPUX (recommended for Storage traffic)
+# - 10G: 192.168.110.10X/24 for GPUX (recommended for Cluster internal interconnect)
+# Detect and bind to the interconnect subnet by default.
+TARGET_CIDR=${TARGET_CIDR:-"192.168.110.0/24"}
+
+# Whether to inject a default route (0.0.0.0/0) in NAD
+# For internal-only interconnect, keep false.
+NAD_DEFAULT_ROUTE=${NAD_DEFAULT_ROUTE:-false}
+
+# Prefer binding Multus NAD to the 25G NIC explicitly when multiple NICs share the same CIDR.
+# Set STORAGE_IFACE to your 25G interface name to avoid ambiguity.
+STORAGE_IFACE=${STORAGE_IFACE:-"enp193s0f0np0"}
+
+# Optional second NAD dedicated to Storage (25G)
+STORAGE_NAD_NAME=${STORAGE_NAD_NAME:-storage-macvlan}
+STORAGE_NAD_NAMESPACE=${STORAGE_NAD_NAMESPACE:-$NAD_NAMESPACE}
+STORAGE_MANIFEST_PATH=${STORAGE_MANIFEST_PATH:-"../manifests/cni/${STORAGE_NAD_NAME}.yaml"}
+STORAGE_DEFAULT_ROUTE=${STORAGE_DEFAULT_ROUTE:-false}
+
 # ================= 0. Pre-flight Checks =================
 echo "[INFO] Starting pre-flight checks..."
 
@@ -30,6 +50,7 @@ echo "[INFO] Cleaning up previous configurations to ensure a fresh install..."
 
 # 1. Delete the NetworkAttachmentDefinition
 kubectl delete -f "$MANIFEST_PATH" 2>/dev/null || echo "   - NAD not found (clean)"
+kubectl delete -f "$STORAGE_MANIFEST_PATH" 2>/dev/null || echo "   - Storage NAD not found (clean)"
 
 # 2. Delete DaemonSets
 kubectl delete daemonset -n kube-system whereabouts 2>/dev/null || echo "   - Whereabouts DS not found (clean)"
@@ -48,36 +69,64 @@ echo "[INFO] Cleanup complete. Waiting 10s for API stability..."
 sleep 10
 
 # ================= 2. Auto-Detection Logic =================
-echo "[INFO] Detecting network configuration..."
+echo "[INFO] Detecting network configuration (target CIDR: ${TARGET_CIDR})..."
 
+# Try to find an interface in the TARGET_CIDR (/24 assumed for prefix matching)
+TARGET_PREFIX=$(echo "$TARGET_CIDR" | cut -d/ -f1 | cut -d. -f1-3)
+INTERCONNECT_IF=$(ip -o -f inet addr show | awk -v pfx="$TARGET_PREFIX" '$4 ~ "^"pfx"\\." {print $2; exit}')
+INTERCONNECT_IP=$(ip -o -f inet addr show | awk -v pfx="$TARGET_PREFIX" '$4 ~ "^"pfx"\\." {print $4; exit}')
+INTERCONNECT_GW=$(ip route | awk -v pfx="$TARGET_PREFIX" '$1 ~ "^"pfx"\\." {for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n1)
+
+# Fallback to default route if TARGET_CIDR interface isn't found
 DEFAULT_ROUTE=$(ip route show default | head -n1)
-DETECTED_IF=$(echo "$DEFAULT_ROUTE" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
-DETECTED_GW=$(echo "$DEFAULT_ROUTE" | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
+DEFAULT_IF=$(echo "$DEFAULT_ROUTE" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+DEFAULT_GW=$(echo "$DEFAULT_ROUTE" | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}')
 
-if [ -z "$DETECTED_IF" ] || [ -z "$DETECTED_GW" ]; then
-    echo "[ERROR] Could not detect interface/gateway. Set MASTER_IF and GATEWAY manually."
-    exit 1
+if [ -z "$INTERCONNECT_IF" ] && [ -z "${MASTER_IF:-}" ]; then
+  echo "[WARN] No interface found in ${TARGET_CIDR}. Falling back to default: $DEFAULT_IF"
 fi
 
-DETECTED_CIDR=$(ip -o -f inet addr show "$DETECTED_IF" | awk '{print $4}' | head -n1)
-
-if [ -z "${RANGE:-}" ]; then
-    IP_PREFIX=$(echo "$DETECTED_GW" | cut -d. -f1-3)
-    DETECTED_RANGE="${IP_PREFIX}.200-${IP_PREFIX}.250/24"
-    echo "[WARN] using auto-detected range: $DETECTED_RANGE"
+# Finalize interface and gateway
+# If STORAGE_IFACE exists, prefer it for NAD binding to 25G.
+if ip -o -f inet addr show "$STORAGE_IFACE" >/dev/null 2>&1; then
+  MASTER_IF=${MASTER_IF:-$STORAGE_IFACE}
 else
-    DETECTED_RANGE=$RANGE
+  MASTER_IF=${MASTER_IF:-${INTERCONNECT_IF:-$DEFAULT_IF}}
+fi
+GATEWAY=${GATEWAY:-${INTERCONNECT_GW}}
+
+if [ -z "$MASTER_IF" ]; then
+  echo "[ERROR] Could not detect a master interface. Set MASTER_IF manually."
+  exit 1
 fi
 
-MASTER_IF=${MASTER_IF:-$DETECTED_IF}
-GATEWAY=${GATEWAY:-$DETECTED_GW}
+# Range detection based on TARGET_PREFIX when not provided
+if [ -z "${RANGE:-}" ]; then
+  IP_PREFIX=${TARGET_PREFIX}
+  DETECTED_RANGE="${IP_PREFIX}.110-${IP_PREFIX}.250/24"
+  echo "[WARN] using auto-detected range: $DETECTED_RANGE"
+else
+  DETECTED_RANGE=$RANGE
+fi
+
 RANGE=$DETECTED_RANGE
+
+# Derive default storage range if not explicitly provided
+if [ -z "${STORAGE_RANGE:-}" ]; then
+  STORAGE_RANGE="$RANGE"
+fi
+STORAGE_GATEWAY=${STORAGE_GATEWAY:-$GATEWAY}
 
 echo "-------------------------------------------------------"
 echo "Active Configuration:"
 echo "  Interface : $MASTER_IF"
-echo "  Gateway   : $GATEWAY"
+echo "  Gateway   : ${GATEWAY:-<none>}"
 echo "  IP Range  : $RANGE"
+echo "  DefaultRt : ${NAD_DEFAULT_ROUTE}"
+echo "  StorageIF : ${STORAGE_IFACE}"
+echo "  StorageRg : ${STORAGE_RANGE}"
+echo "  StorageGw : ${STORAGE_GATEWAY:-<none>}"
+echo "  StorageRt : ${STORAGE_DEFAULT_ROUTE}"
 echo "-------------------------------------------------------"
 
 # Try to detect cluster Pod CIDR to validate no-overlap between Pod network and macvlan range.
@@ -202,6 +251,17 @@ kubectl -n kube-system rollout status daemonset/whereabouts --timeout=120s || tr
 # ================= 5. Configure Macvlan NAD =================
 
 echo "[INFO] Configuring Macvlan NetworkAttachmentDefinition..."
+IPAM_JSON="{\"type\": \"whereabouts\", \"range\": \"$RANGE\""
+if [ -n "$GATEWAY" ]; then
+  IPAM_JSON="$IPAM_JSON, \"gateway\": \"$GATEWAY\""
+fi
+if [ "$NAD_DEFAULT_ROUTE" = "true" ] && [ -n "$GATEWAY" ]; then
+  IPAM_JSON="$IPAM_JSON, \"routes\": [ { \"dst\": \"0.0.0.0/0\" } ]"
+fi
+IPAM_JSON="$IPAM_JSON}"
+
+NAD_JSON="{\"cniVersion\": \"0.3.1\", \"type\": \"macvlan\", \"master\": \"$MASTER_IF\", \"mode\": \"bridge\", \"mtu\": 1400, \"ipam\": $IPAM_JSON}"
+
 cat <<EOF > "$MANIFEST_PATH"
 apiVersion: "k8s.cni.cncf.io/v1"
 kind: NetworkAttachmentDefinition
@@ -209,21 +269,38 @@ metadata:
   name: $NAD_NAME
   namespace: $NAD_NAMESPACE
 spec:
-  config: '{
-      "cniVersion": "0.3.1",
-      "type": "macvlan",
-      "master": "$MASTER_IF",
-      "mode": "bridge",
-      "mtu": 1500,
-      "ipam": {
-        "type": "whereabouts",
-        "range": "$RANGE",
-        "gateway": "$GATEWAY",
-        "routes": [ { "dst": "0.0.0.0/0" } ]
-      }
-    }'
+  config: '$NAD_JSON'
 EOF
 kubectl apply -f "$MANIFEST_PATH"
+
+echo "[INFO] Configuring Storage Macvlan NetworkAttachmentDefinition..."
+S_IPAM_JSON="{\"type\": \"whereabouts\", \"range\": \"$STORAGE_RANGE\""
+if [ -n "$STORAGE_GATEWAY" ]; then
+  S_IPAM_JSON="$S_IPAM_JSON, \"gateway\": \"$STORAGE_GATEWAY\""
+fi
+if [ "$STORAGE_DEFAULT_ROUTE" = "true" ] && [ -n "$STORAGE_GATEWAY" ]; then
+  S_IPAM_JSON="$S_IPAM_JSON, \"routes\": [ { \"dst\": \"0.0.0.0/0\" } ]"
+fi
+S_IPAM_JSON="$S_IPAM_JSON}"
+
+# choose master for storage: prefer STORAGE_IFACE if present
+S_MASTER_IF="$STORAGE_IFACE"
+if ! ip -o -f inet addr show "$S_MASTER_IF" >/dev/null 2>&1; then
+  S_MASTER_IF="$MASTER_IF"
+fi
+
+S_NAD_JSON="{\"cniVersion\": \"0.3.1\", \"type\": \"macvlan\", \"master\": \"$S_MASTER_IF\", \"mode\": \"bridge\", \"mtu\": 1400, \"ipam\": $S_IPAM_JSON}"
+
+cat <<EOF > "$STORAGE_MANIFEST_PATH"
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: $STORAGE_NAD_NAME
+  namespace: $STORAGE_NAD_NAMESPACE
+spec:
+  config: '$S_NAD_JSON'
+EOF
+kubectl apply -f "$STORAGE_MANIFEST_PATH"
 
 # ================= 6. Verification =================
 echo "[INFO] Verifying Installation..."

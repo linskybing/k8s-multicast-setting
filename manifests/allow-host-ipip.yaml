@@ -1,0 +1,14 @@
+apiVersion: crd.projectcalico.org/v1
+kind: GlobalNetworkPolicy
+metadata:
+  name: allow-node-to-node-ipip
+spec:
+  selector: all()
+  types:
+  - Ingress
+  ingress:
+  - action: Allow
+    protocol: IPIP
+    source:
+      nets:
+      - 192.168.110.0/24

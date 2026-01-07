@@ -1,0 +1,13 @@
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    token: os0yef.xlnsjayi74do2oi8
+    apiServerEndpoint: 192.168.110.101:6443
+    caCertHashes:
+    - sha256:f2ac5d0685d3f8fe26f6bff1411ef40cbfb28ef5df16bbf6c80df614330f6e66
+nodeRegistration:
+  name: gpu2
+  kubeletExtraArgs:
+  - name: "node-ip"
+    value: "192.168.110.102"

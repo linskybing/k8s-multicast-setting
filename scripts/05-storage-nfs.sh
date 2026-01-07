@@ -4,7 +4,11 @@ set -e
 # Nodes Configuration
 NODES=("gpu1" "gpu2" "gpu3")
 NFS_SERVER_NODE="gpu1"
-NFS_SERVER_IP="192.168.109.1"
+# Preferred 25Gb Interconnect for Storage
+INTERCONNECT_CIDR="192.168.110.0/24"
+STORAGE_IFACE=${STORAGE_IFACE:-"enp193s0f0np0"}
+# Default NFS Server IP on 25Gb (override with env or set to 'auto' to detect)
+NFS_SERVER_IP=${NFS_SERVER_IP:-"192.168.110.1"}
 EXPORT_PATH="/data/k8s-nfs"
 
 # Interactive Password Prompt
@@ -41,9 +45,9 @@ fi
     # CLEANUP: Remove lines starting with digits (previous script error caused password specific artifacts)
     echo "$NODE_PASS" | sudo -S -p '' bash -c "sed -i '/^[0-9]/d' /etc/exports"
 
-    # Add export if not exists
+    # Add export if not exists (restrict to Interconnect CIDR)
     if ! grep -q "$EXPORT_PATH" /etc/exports; then
-        echo "$NODE_PASS" | sudo -S -p '' bash -c "echo '$EXPORT_PATH *(rw,sync,no_subtree_check,no_root_squash)' >> /etc/exports"
+        echo "$NODE_PASS" | sudo -S -p '' bash -c "echo '$EXPORT_PATH $INTERCONNECT_CIDR(rw,sync,no_subtree_check,no_root_squash)' >> /etc/exports"
     fi
 
 echo "   - Restarting NFS Server"
@@ -82,6 +86,24 @@ EOF
     done
 }
 
+# 2.5 Detect NFS Server IP on 25Gb iface when requested
+detect_nfs_ip() {
+    if [ "$NFS_SERVER_IP" = "auto" ]; then
+        echo ">> Detecting NFS Server IP on iface $STORAGE_IFACE..."
+        CMD_CONTENT=$(cat <<EOF
+ip -4 -o addr show "$STORAGE_IFACE" | awk '{print \$4}' | cut -d/ -f1
+EOF
+)
+        B64_CMD=$(echo "$CMD_CONTENT" | base64 -w0)
+        if [ "$NFS_SERVER_NODE" == "$(hostname)" ]; then
+            NFS_SERVER_IP=$(echo "$B64_CMD" | base64 -d | bash)
+        else
+            NFS_SERVER_IP=$(sshpass -p "$NODE_PASS" ssh -o StrictHostKeyChecking=no -t $NFS_SERVER_NODE "echo '$B64_CMD' | base64 -d | bash" 2>/dev/null | tr -d '\r')
+        fi
+        echo ">> Detected NFS Server IP: $NFS_SERVER_IP"
+    fi
+}
+
 # 3. Deploy Kubernetes NFS Provisioner
 setup_k8s_provisioner() {
     echo ">> Deploying NFS Subdir External Provisioner..."
@@ -104,6 +126,7 @@ setup_k8s_provisioner() {
 # Execution
 setup_nfs_server
 setup_clients
+detect_nfs_ip
 setup_k8s_provisioner
 
 echo "====================================================="

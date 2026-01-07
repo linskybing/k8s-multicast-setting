@@ -9,16 +9,18 @@ CUSTOM_PREFIX=${2:-gpu}     # aggregated resource uses default nvidia.com/gpu
 TARGET_NODE=${3:-$(kubectl get nodes -o name | head -n 1 | cut -d/ -f2)}
 PLUGIN_IMAGE_REPO=${4:-${PLUGIN_IMAGE_REPO:-docker.io/linskybing/k8s-device-plugin}}
 PLUGIN_IMAGE_TAG=${5:-${PLUGIN_IMAGE_TAG:-mps-pack-strategy}}
+# Optional: image pull secret for private registries (e.g., Harbor)
+IMAGE_PULL_SECRET_NAME=${6:-${IMAGE_PULL_SECRET_NAME:-harbor-regcred}}
 if [ "$REPLICAS" -lt 1 ]; then
   REPLICAS=1
 fi
 
 # Validate args
 if [ -z "$CUSTOM_PREFIX" ] || [ -z "$TARGET_NODE" ] || [ -z "$PLUGIN_IMAGE_REPO" ]; then
-  echo "[ERROR] Usage: ./03-install-gpu-drivers.sh <replicas-per-gpu> <resource-name> <node-name|all> <image-repo> [image-tag]"
-  echo "Example: ./03-install-gpu-drivers.sh 25 gpu gpu1 docker.io/library/k8s-device-plugin mps-individual-allowmulti"
-  echo "Example (all nodes): ./03-install-gpu-drivers.sh 25 gpu all docker.io/library/k8s-device-plugin mps-individual-allowmulti"
-  echo "Hint: You can also set env PLUGIN_IMAGE_REPO and PLUGIN_IMAGE_TAG instead of passing args 4/5."
+  echo "[ERROR] Usage: ./03-install-gpu-drivers.sh <replicas-per-gpu> <resource-name> <node-name|all> <image-repo> [image-tag] [image-pull-secret]"
+  echo "Example: ./03-install-gpu-drivers.sh 25 gpu gpu1 192.168.110.1:30003/library/k8s-device-plugin mps-pack-strategy harbor-regcred"
+  echo "Example (all nodes): ./03-install-gpu-drivers.sh 25 gpu all 192.168.110.1:30003/library/k8s-device-plugin mps-pack-strategy harbor-regcred"
+  echo "Hint: You can also set env PLUGIN_IMAGE_REPO, PLUGIN_IMAGE_TAG, IMAGE_PULL_SECRET_NAME instead of passing args 4/5/6."
   exit 1
 fi
 
@@ -122,6 +124,7 @@ cat <<EOF > "$VALUES_FILE"
 image:
   repository: "$PLUGIN_IMAGE_REPO"
   tag: "$PLUGIN_IMAGE_TAG"
+  pullPolicy: IfNotPresent
 
 config:
   default: "$CONFIG_KEY"
@@ -184,6 +187,9 @@ securityContext:
       - SYS_ADMIN
       - SYS_RAWIO
   allowPrivilegeEscalation: true
+
+imagePullSecrets:
+  - name: "$IMAGE_PULL_SECRET_NAME"
 
 EOF
 
