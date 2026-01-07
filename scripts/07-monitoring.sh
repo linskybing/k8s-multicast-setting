@@ -263,13 +263,13 @@ helm upgrade --install harbor harbor/harbor \
   --set expose.tls.nodePort=$HTTPS_NODE_PORT \
   --set expose.nodePort.httpNodePort=$HTTP_NODE_PORT \
   --set externalURL="https://$DATA_IP:$HTTPS_NODE_PORT" \
-  --set internalTLS.enabled=false \
   --set persistence.persistentVolumeClaim.registry.storageClass=$STORAGE_CLASS \
   --set persistence.persistentVolumeClaim.registry.size=200Gi \
   --set persistence.persistentVolumeClaim.jobservice.storageClass=$STORAGE_CLASS \
   --set persistence.persistentVolumeClaim.database.storageClass=$STORAGE_CLASS \
   --set persistence.persistentVolumeClaim.redis.storageClass=$STORAGE_CLASS \
   --set persistence.persistentVolumeClaim.trivy.storageClass=$STORAGE_CLASS \
+  --set internalTLS.enabled=false \
   --wait
 
 step "6. Deploy Prometheus & Grafana"

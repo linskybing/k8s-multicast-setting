@@ -9,6 +9,7 @@ CUSTOM_PREFIX=${2:-gpu}     # aggregated resource uses default nvidia.com/gpu
 TARGET_NODE=${3:-$(kubectl get nodes -o name | head -n 1 | cut -d/ -f2)}
 PLUGIN_IMAGE_REPO=${4:-${PLUGIN_IMAGE_REPO:-docker.io/linskybing/k8s-device-plugin}}
 PLUGIN_IMAGE_TAG=${5:-${PLUGIN_IMAGE_TAG:-mps-pack-strategy}}
+NS=nvidia-device-plugin
 # Optional: image pull secret for private registries (e.g., Harbor)
 IMAGE_PULL_SECRET_NAME=${6:-${IMAGE_PULL_SECRET_NAME:-harbor-regcred}}
 if [ "$REPLICAS" -lt 1 ]; then
@@ -65,39 +66,16 @@ sudo apt-get install -y nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=containerd --set-as-default
 sudo systemctl restart containerd
 echo "[Step 3] Cleaning up old resources (mps/gpu)..."
-helm uninstall nvidia-device-plugin -n kube-system 2>/dev/null || true
-kubectl delete daemonset nvidia-device-plugin nvidia-device-plugin-mps-control-daemon -n kube-system 2>/dev/null || true
-kubectl delete configmap nvidia-device-plugin-config nvidia-device-plugin-configs -n kube-system 2>/dev/null || true
+helm uninstall nvidia-device-plugin -n $NS 2>/dev/null || true
+kubectl delete daemonset nvidia-device-plugin nvidia-device-plugin-mps-control-daemon -n $NS 2>/dev/null || true
+kubectl delete configmap nvidia-device-plugin-config nvidia-device-plugin-configs -n $NS 2>/dev/null || true
 sudo rm -f /var/lib/kubelet/device-plugins/nvidia.sock 2>/dev/null || true
 kubectl label node "$TARGET_NODE" nvidia.com/mps.capable- 2>/dev/null || true
 kubectl patch node "$TARGET_NODE" --type=json --subresource=status -p='[{"op":"remove","path":"/status/capacity/nvidia.com~1mps-0"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-1"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-2"},{"op":"remove","path":"/status/capacity/nvidia.com~1mps-3"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-0"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-1"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-2"},{"op":"remove","path":"/status/allocatable/nvidia.com~1mps-3"}]' 2>/dev/null || true
-# aggregated resource uses default nvidia.com/gpu; cleanup already handled above
-kubectl patch node "$TARGET_NODE" --type=json --subresource=status -p='[
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-0"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-1"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-2"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu-3"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu.shared"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-0"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-1"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-2"},
-  {"op":"remove","path":"/status/capacity/nvidia.com~1gpu1-3"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-0"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-1"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-2"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu-3"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu.shared"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-0"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-1"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-2"},
-  {"op":"remove","path":"/status/allocatable/nvidia.com~1gpu1-3"}
-]' 2>/dev/null || true
 
 echo "Waiting for old pods to terminate..."
-kubectl delete pod -n kube-system -l app.kubernetes.io/name=nvidia-device-plugin --force --grace-period=0 2>/dev/null || true
-kubectl wait --for=delete pod -n kube-system -l app.kubernetes.io/name=nvidia-device-plugin --timeout=90s 2>/dev/null || true
+kubectl delete pod -n $NS -l app.kubernetes.io/name=nvidia-device-plugin --force --grace-period=0 2>/dev/null || true
+kubectl wait --for=delete pod -n $NS -l app.kubernetes.io/name=nvidia-device-plugin --timeout=90s 2>/dev/null || true
 
 echo "[Step 3b] Resetting kubelet device-plugin state..."
 if command -v systemctl >/dev/null 2>&1; then
@@ -203,14 +181,14 @@ else
   kubectl label node "$TARGET_NODE" nvidia.com/mps.capable=true --overwrite
 fi
 helm upgrade --install nvidia-device-plugin /home/user/k8s-gpu-platform/k8s-device-plugin/deployments/helm/nvidia-device-plugin \
-  --namespace kube-system \
+  --namespace $NS \
   --create-namespace \
   -f "$VALUES_FILE" \
   --wait --timeout 180s
 
 echo "[Step 5b] Waiting for DaemonSets to become Ready..."
-kubectl rollout status ds/nvidia-device-plugin -n kube-system --timeout=120s || true
-kubectl rollout status ds/nvidia-device-plugin-mps-control-daemon -n kube-system --timeout=120s || true
+kubectl rollout status ds/nvidia-device-plugin -n $NS --timeout=120s || true
+kubectl rollout status ds/nvidia-device-plugin-mps-control-daemon -n $NS --timeout=120s || true
 
 echo "[Step 6] Verifying Node Resources..."
 VERIFY_NODES="$TARGET_NODE"
@@ -226,7 +204,7 @@ for node in $VERIFY_NODES; do
     echo "--------------------------------------------------------"
   else
     echo "[WARNING] Node $node: Resources not visible yet."
-    echo "Please check logs: kubectl logs -n kube-system -l app.kubernetes.io/name=nvidia-device-plugin"
+    echo "Please check logs: kubectl logs -n $NS -l app.kubernetes.io/name=nvidia-device-plugin"
   fi
 done
 echo "Setup Complete."
