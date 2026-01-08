@@ -14,14 +14,13 @@ spec:
     image: nvidia/cuda:12.4.1-devel-ubuntu22.04
     resources:
       limits:
-        nvidia.com/gpu: 20
+        nvidia.com/gpu: 35
     command: ["/bin/bash", "-c"]
     args:
       - |
         echo "=== [BASELINE 100%] Generating Code ==="
         echo "[DEBUG] Initial CUDA env:" && env | grep -E "CUDA_MPS|CUDA_VISIBLE|NVIDIA_VISIBLE|GPU_QUOTA"
         echo "[DEBUG] Testing nvidia-smi:" && nvidia-smi -L
-        echo "[DEBUG] Device files:" && ls -la /dev/nvidia*
         echo "[DEBUG] Creating simple CUDA test..."
         cat > simple_test.cu << 'SIMPLETEST'
         #include <cuda_runtime.h>
@@ -116,13 +115,13 @@ spec:
   runtimeClassName: nvidia
   restartPolicy: Never
   nodeSelector:
-    kubernetes.io/hostname: gpu2
+    kubernetes.io/hostname: gpu1
   containers:
   - name: cuda-app
     image: nvidia/cuda:12.4.1-devel-ubuntu22.04
     resources:
       limits:
-        nvidia.com/gpu: 5
+        nvidia.com/gpu: 10
     command: ["/bin/bash", "-c"]
     args:
       - |

@@ -96,6 +96,8 @@ EOF
 openssl x509 -req -in "$CERTS_DIR/harbor.csr" -CA "$CERTS_DIR/ca.crt" -CAkey "$CERTS_DIR/ca.key" -CAcreateserial \
  -out "$CERTS_DIR/harbor.crt" -days 3650 -sha512 -extfile "$CERTS_DIR/v3.ext"
 
+openssl verify -CAfile $CERTS_DIR/ca.crt $CERTS_DIR/harbor.crt
+
 log "Certificates generated. Valid for IPs: $DATA_IP and $UI_IP"
 
 step "3. Kubernetes Secrets & Namespaces"
@@ -139,7 +141,7 @@ metadata:
   name: harbor-ca-cert
   namespace: $INSTALLER_NAMESPACE
 data:
-  harbor.crt: |
+  ca.crt: |
 $(sed 's/^/    /' "$CERTS_DIR/ca.crt")
 EOF
 
@@ -189,12 +191,6 @@ spec:
             HOSTS_FILE="\$HOSTS_DIR/hosts.toml"
             
             # === IDEMPOTENCY CHECK ===
-            # If the hosts.toml exists, we assume configuration is done.
-            if [ -f "\$HOSTS_FILE" ]; then
-                echo "Certificate configuration for \$TARGET_IP already exists. Skipping."
-                exit 0
-            fi
-
             echo "Configuring Containerd for Harbor (\$TARGET_IP)..."
 
             # 1. Ensure containerd config exists and is valid
@@ -211,7 +207,7 @@ spec:
 
             # 2. Write Certificate and hosts.toml
             mkdir -p "\$HOSTS_DIR"
-            cp /config/harbor.crt "\$HOSTS_DIR/ca.crt"
+            cp /config/ca.crt "\$HOSTS_DIR/ca.crt"
             
             echo "Generating hosts.toml..."
             printf 'server = "https://%s:%s"\n' "\$TARGET_IP" "\$TARGET_PORT" > "\$HOSTS_FILE"

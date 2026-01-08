@@ -8,7 +8,7 @@ REPLICAS=${1:-20}           # per-GPU replicas (quota per card)
 CUSTOM_PREFIX=${2:-gpu}     # aggregated resource uses default nvidia.com/gpu
 TARGET_NODE=${3:-$(kubectl get nodes -o name | head -n 1 | cut -d/ -f2)}
 PLUGIN_IMAGE_REPO=${4:-${PLUGIN_IMAGE_REPO:-docker.io/linskybing/k8s-device-plugin}}
-PLUGIN_IMAGE_TAG=${5:-${PLUGIN_IMAGE_TAG:-mps-pack-strategy}}
+PLUGIN_IMAGE_TAG=${5:-${PLUGIN_IMAGE_TAG:-latest}}
 NS=nvidia-device-plugin
 # Optional: image pull secret for private registries (e.g., Harbor)
 IMAGE_PULL_SECRET_NAME=${6:-${IMAGE_PULL_SECRET_NAME:-harbor-regcred}}
