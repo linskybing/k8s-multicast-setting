@@ -1,0 +1,78 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mps-pressure
+  labels:
+    app: mps-pressure
+spec:
+  completions: 24
+  parallelism: 24
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        test: mps-pressure
+    spec:
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      containers:
+      - name: cuda-app
+        image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+        resources:
+          limits:
+            nvidia.com/gpu: 10
+        command: ["/bin/bash","-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "=== [JOB PRESSURE] starting (4 workers) ==="
+            echo "[DEBUG] CUDA env:" && env | grep -E "CUDA_MPS|CUDA_VISIBLE|NVIDIA_VISIBLE|GPU_QUOTA" || true
+            nvidia-smi -L || true
+            cat > benchmark.cu <<'EOF'
+            #include <cuda_runtime.h>
+            #include <cstdio>
+            #include <cmath>
+            #define N 2048
+
+            __global__ void heavy_kernel(float *a, int n) {
+              int idx = blockIdx.x * blockDim.x + threadIdx.x;
+              if (idx < n * n) {
+                float val = 0.0f;
+                for (int i = 0; i < 1000; ++i) {
+                  val += sinf(idx * i) * cosf(idx * i);
+                }
+                a[idx] = val;
+              }
+            }
+
+            int main() {
+              float *d_a;
+              size_t size = (size_t)N * N * sizeof(float);
+              if (cudaMalloc(&d_a, size) != cudaSuccess) return 1;
+              int threads = 256;
+              int blocks = (N * N + threads - 1) / threads;
+              heavy_kernel<<<blocks, threads>>>(d_a, N);
+              cudaDeviceSynchronize();
+              cudaFree(d_a);
+              return 0;
+            }
+            EOF
+            nvcc benchmark.cu -o benchmark -O3 || true
+
+            run_worker() {
+              id="$1"
+              start_ns=$(date +%s%N)
+              echo "[WORKER ${id}] start: $(date -Iseconds)"
+              ./benchmark
+              rc=$?
+              end_ns=$(date +%s%N)
+              dur_ms=$(( (end_ns - start_ns) / 1000000 ))
+              echo "[WORKER ${id}] exit=${rc} duration_ms=${dur_ms}"
+            }
+
+            # start 4 workers in parallel
+            for i in 0 1 2 3; do
+              run_worker "$i" &
+            done
+            wait
+            echo "All workers finished"
